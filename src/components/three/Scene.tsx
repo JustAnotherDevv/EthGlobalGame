@@ -1087,7 +1087,7 @@ function Palms({ seed, rockData, leafGeometry, onPalmData }: { seed: number, roc
 
       const height = 4 + random() * 3
       const rotationY = random() * Math.PI * 2
-      const leafCount = 12 + Math.floor(random() * 4)
+      const leafCount = 6 + Math.floor(random() * 3) // Fewer leaves (was 12-15, now 6-8)
       const trunkLean = (random() - 0.5) * 0.15
       const trunkLeanDir = random() * Math.PI * 2
       const radius = 2.5; // Radius for other objects to avoid
@@ -1187,21 +1187,19 @@ function Palms({ seed, rockData, leafGeometry, onPalmData }: { seed: number, roc
       varying vec2 vUv;
       varying vec3 vInstanceColor;
       void main() {
-        // Simple leaf shape discard
+        // No discards - we have proper 3D geometry now
         float centerDist = abs(vUv.x - 0.5) * 2.0; // Normalized 0 to 1 from center
-        float leafShape = smoothstep(1.0, 0.9, centerDist);
-        if (vUv.y > 0.95 || leafShape < 0.1) discard;
 
         // Vertical gradient
         vec3 baseColor = vInstanceColor * 0.7;
         vec3 tipColor = vInstanceColor * 1.3;
         vec3 color = mix(baseColor, tipColor, vUv.y);
-        
+
         // Mid-rib detail
         float midRib = 1.0 - smoothstep(0.0, 0.1, abs(vUv.x - 0.5));
         color *= (1.0 + midRib * 0.2);
 
-        // Subtle fringe detail
+        // Subtle fringe detail for texture
         float fringe = sin(vUv.x * 60.0) * 0.05 * vUv.y;
         color += fringe;
 
@@ -1231,30 +1229,40 @@ function Palms({ seed, rockData, leafGeometry, onPalmData }: { seed: number, roc
     const random = mulberry32(seed * 77777);
     let totalIdx = 0
     palms.forEach((palm) => {
-      // In trunk shader: 
-      // h = pos.y (0 to 1)
-      // bend = pow(h, 2.0) * 1.2
-      // pos.x += bend
-      // Cylinder is scaled by (0.6, palm.height, 0.6)
-      
-      const localTop = new THREE.Vector3(1.2 * 0.6, 1.0 * palm.height, 0); // Correct local-scaled position
-      const worldTop = new THREE.Vector3();
-      
-      // Apply rotation and translation to the local-scaled position
+      // Position leaves at the ACTUAL CENTER of the bent trunk top
+      // Trunk shader applies: pos.x += pow(h, 2.0) * 1.2
+      // At h=1 (top): bend = 1.2, scaled by trunk scale 0.6 = 0.72 offset
+      // But we need the CENTER of the trunk cross-section at the top, which is at the bent position
+
+      // The trunk bends, then there's also sway in the shader, but we use the base bend
+      const bendAtTop = Math.pow(1.0, 2.0) * 1.2 // = 1.2
+      const scaledBend = bendAtTop * 0.6 // Trunk is scaled by 0.6 in X
+
+      // Local top position after accounting for bend (this is where trunk center actually is)
+      const localTop = new THREE.Vector3(scaledBend, 1.0 * palm.height, 0)
+
+      // Transform to world space: apply trunk rotation, then translate
+      const worldTop = new THREE.Vector3()
       worldTop.copy(localTop)
         .applyEuler(new THREE.Euler(palm.trunkLean, palm.trunkLeanDir, 0))
-        .add(new THREE.Vector3(palm.x, -0.5, palm.z));
+        .add(new THREE.Vector3(palm.x, -0.5, palm.z))
 
       for (let j = 0; j < palm.leafCount; j++) {
         const angle = (j * Math.PI * 2) / palm.leafCount + palm.rotationY;
-        const leafLen = 7.0 + random() * 4.0; 
-        const leafWidth = 1.0 + random() * 0.5;
-        
-        dummy.position.copy(worldTop)
-        // Rotate leaf to point outwards and tilt down significantly
-        const downwardTilt = 0.6 + random() * 0.4;
+        // Scale leaf length proportionally to palm height
+        const leafLen = (palm.height * 0.4) + random() * (palm.height * 0.2); // Proportional to tree height
+        const leafWidth = 2.0 + random() * 0.8; // Wider leaves (was 1.0 + random() * 0.5)
+
+        // Position leaves at the top of the trunk (touching the top)
+        const leafPosition = worldTop.clone()
+        // No Y offset - leaves start right at trunk top
+
+        dummy.position.copy(leafPosition)
+        // Mostly horizontal with tiny upward start, then shader bends them down for arc
+        // Positive = tilt down, so we use mostly horizontal (around 0.8-1.1) with slight reduction
+        const tilt = 0.7 + random() * 0.2; // Mostly horizontal, slight upward bias
         dummy.rotation.set(0, angle, 0, 'YXZ') // Rotate around Y first
-        dummy.rotateX(downwardTilt) // Then tilt down locally
+        dummy.rotateX(tilt) // Tilt mostly horizontal, shader adds downward bend for arc
         dummy.scale.set(leafWidth, leafLen, 1)
         
         dummy.updateMatrix()
@@ -1407,7 +1415,7 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
       const islandValue = getIslandShape(x, z, seed, false, true)
       // Threshold must be higher than beach edge (edgeThreshold + beachWidth = 0.24)
       // Using 0.45 for a moderate safety margin - grass stays off beach but closer to it
-      const grassThreshold = 0.2
+      const grassThreshold = 0.23
       if (islandValue < grassThreshold) continue;
 
       // Check for rock collision
@@ -2061,8 +2069,25 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
   const [palmData, setPalmData] = useState<{ x: number, z: number, radius: number }[]>([])
   
   const leafGeometry = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(1, 1, 1, 8) // 8 vertical segments for smooth bending
+    // Create palm frond with thickness and segmented appearance
+    const segments = 12 // More segments for better shape
+    const geo = new THREE.BoxGeometry(1, 1, 0.15, 3, segments, 1) // Added thickness (0.15) and segments
     geo.translate(0, 0.5, 0) // Base at origin
+
+    // Modify geometry to create segmented palm frond shape
+    const pos = geo.attributes.position
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i)
+      const y = pos.getY(i)
+
+      // Create tapering and add slight serration to edges for palm frond segments
+      const taper = 1.0 - y * 0.7
+      const segmentPattern = Math.sin(y * segments * Math.PI) * 0.08 // Create indentations
+      const edgeModulation = Math.abs(x) > 0.3 ? segmentPattern : 0 // Only at edges
+
+      pos.setX(i, x * (taper + edgeModulation))
+    }
+    geo.computeVertexNormals()
     return geo
   }, [])
   
