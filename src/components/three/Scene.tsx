@@ -127,7 +127,7 @@ function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: nu
   )
 }
 
-function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, rockData: { x: number, z: number, radius: number }[] }) {
+function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, rockData: { x: number, z: number, radius: number }[], gameState: 'preview' | 'playing' }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const nearMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const midMaterialRef = useRef<THREE.ShaderMaterial>(null)
@@ -219,16 +219,20 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
         uCameraPos: { value: new THREE.Vector3() },
         uProjectionMatrix: { value: new THREE.Matrix4() },
         uViewMatrix: { value: new THREE.Matrix4() },
+        uIsPreview: { value: gameState === 'preview' ? 1.0 : 0.0 },
+        ...THREE.UniformsLib.fog,
       },
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vInstanceColor;
-        varying vec3 vWorldPosition;
+        // varying vec3 vWorldPosition;
         uniform float uTime;
         uniform vec3 uPlayerPos;
         uniform vec3 uCameraPos;
         uniform mat4 uProjectionMatrix;
         uniform mat4 uViewMatrix;
+        uniform float uIsPreview;
+        // #include <fog_pars_vertex>
         
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -253,15 +257,15 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
           // Project the world instance position to clip space
           vec4 clipPos = uProjectionMatrix * uViewMatrix * vec4(worldInstancePos, 1.0);
           // Add a larger margin to prevent popping at edges during fast rotation
-          float margin = 30.0;
-          if (abs(clipPos.x) > clipPos.w + margin || abs(clipPos.y) > clipPos.w + margin || clipPos.z < -clipPos.w - margin || clipPos.z > clipPos.w + margin) {
+          float margin = 200.0;
+          if (abs(clipPos.x) > clipPos.w + margin || abs(clipPos.y) > clipPos.w + margin) {
              gl_Position = vec4(0.0);
              return;
           }
 
           float distToCamera = distance(worldInstancePos, uCameraPos);
-          float maxDist = 100.0;
-          float extremeDist = 180.0;
+          float maxDist = uIsPreview > 0.5 ? 400.0 : 100.0;
+          float extremeDist = uIsPreview > 0.5 ? 500.0 : 180.0;
           
           // Optimization: Progressive density reduction for far grass
           // We use a pseudo-random value based on instance position to decide if we cull
@@ -273,7 +277,14 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
           // Extreme distance: very low density (background layer)
           float densityThreshold = smoothstep(extremeDist, maxDist * 0.3, distToCamera);
           
-          if (distToCamera > extremeDist || h > densityThreshold + 0.05) {
+          if (distToCamera > extremeDist) {
+            gl_Position = vec4(0.0);
+            return;
+          }
+
+          // Reduce density in preview mode or when far away in playing mode
+          float threshold = uIsPreview > 0.5 ? 0.2 : densityThreshold + 0.15;
+          if (h > threshold) {
             gl_Position = vec4(0.0);
             return;
           }
@@ -306,17 +317,24 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
 
           // Smoothly fade out to transparent/ground color at extreme distances
           float fadeOut = 1.0 - smoothstep(extremeDist * 0.7, extremeDist, distToCamera);
-          pos *= fadeOut;
+          // pos *= fadeOut; // Temporarily disable scale-based fading to ensure visibility
 
           vec4 worldPos = modelMatrix * instanceMatrix * vec4(pos, 1.0);
-          vWorldPosition = worldPos.xyz;
+          // vWorldPosition = worldPos.xyz;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
+          
+          // Force apply fadeOut to gl_Position if needed, or just let fog handle it
+          // gl_Position.xyz *= fadeOut; 
+          
+          // #include <fog_vertex>
         }
       `,
       fragmentShader: `
         varying vec2 vUv;
         varying vec3 vInstanceColor;
-        varying vec3 vWorldPosition;
+        // varying vec3 vWorldPosition;
+        uniform float uIsPreview;
+        // #include <fog_pars_fragment>
         
         void main() {
           // Simplified lighting/shading
@@ -336,11 +354,13 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
           finalColor += highlight * vUv.y * 0.1;
           
           gl_FragColor = vec4(finalColor, 1.0);
+          // #include <fog_fragment>
         }
-      `
+      `,
+      fog: false,
     }
     return { nearGeometry: nearGeo, midGeometry: midGeo, farGeometry: farGeo, grassShader: shader }
-  }, [seed])
+  }, [seed, gameState])
 
   const setNearInstances = (mesh: THREE.InstancedMesh | null) => {
     if (!mesh) return
@@ -395,26 +415,32 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
     const cameraPos = state.camera.position
     const playerPos = playerRef.current ? playerRef.current.position : new THREE.Vector3()
 
+    const projMatrix = state.camera.projectionMatrix
+    const viewMatrix = state.camera.matrixWorldInverse
+
     if (nearMaterialRef.current) {
       nearMaterialRef.current.uniforms.uTime.value = time
       nearMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
       nearMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      nearMaterialRef.current.uniforms.uProjectionMatrix.value.copy(state.camera.projectionMatrix)
-      nearMaterialRef.current.uniforms.uViewMatrix.value.copy(state.camera.matrixWorldInverse)
+      nearMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
+      nearMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
+      nearMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
     }
     if (midMaterialRef.current) {
       midMaterialRef.current.uniforms.uTime.value = time
       midMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
       midMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      midMaterialRef.current.uniforms.uProjectionMatrix.value.copy(state.camera.projectionMatrix)
-      midMaterialRef.current.uniforms.uViewMatrix.value.copy(state.camera.matrixWorldInverse)
+      midMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
+      midMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
+      midMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
     }
     if (farMaterialRef.current) {
       farMaterialRef.current.uniforms.uTime.value = time
       farMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
       farMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      farMaterialRef.current.uniforms.uProjectionMatrix.value.copy(state.camera.projectionMatrix)
-      farMaterialRef.current.uniforms.uViewMatrix.value.copy(state.camera.matrixWorldInverse)
+      farMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
+      farMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
+      farMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
     }
   })
 
@@ -423,25 +449,31 @@ function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.R
       <instancedMesh ref={setNearInstances} args={[nearGeometry, undefined, NEAR_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
         <shaderMaterial
           ref={nearMaterialRef}
+          attach="material"
           args={[grassShader]}
           vertexColors
           side={THREE.DoubleSide}
+          fog={true}
         />
       </instancedMesh>
       <instancedMesh ref={setMidInstances} args={[midGeometry, undefined, MID_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
         <shaderMaterial
           ref={midMaterialRef}
+          attach="material"
           args={[grassShader]}
           vertexColors
           side={THREE.DoubleSide}
+          fog={true}
         />
       </instancedMesh>
       <instancedMesh ref={setFarInstances} args={[farGeometry, undefined, FAR_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
         <shaderMaterial
           ref={farMaterialRef}
+          attach="material"
           args={[grassShader]}
           vertexColors
           side={THREE.DoubleSide}
+          fog={true}
         />
       </instancedMesh>
     </group>
@@ -498,7 +530,7 @@ function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: n
       varying vec3 vColor;
       uniform float uTime;
       uniform vec3 uCameraPos;
-      
+        
       void main() {
         vUv = uv;
         vColor = instanceColor;
@@ -520,6 +552,7 @@ function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: n
         pos *= flowerFade;
         
         gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(pos, 1.0);
+        // #include <fog_vertex>
       }
     `,
     fragmentShader: `
@@ -527,6 +560,7 @@ function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: n
       varying vec3 vColor;
       void main() {
         gl_FragColor = vec4(vColor, 1.0);
+        // #include <fog_fragment>
       }
     `
   }), [])
@@ -556,25 +590,29 @@ function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: n
   return (
     <instancedMesh ref={setInstances} args={[undefined, undefined, FLOWER_COUNT]} castShadow frustumCulled={false}>
       <sphereGeometry args={[0.5, 6, 6]} />
-      <shaderMaterial ref={materialRef} args={[flowerShader]} vertexColors />
+      <shaderMaterial ref={materialRef} attach="material" args={[flowerShader]} vertexColors />
     </instancedMesh>
   )
 }
 
-function IslandGround({ seed }: { seed: number }) {
+function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' | 'playing' }) {
   const shader = useMemo(() => ({
     uniforms: {
       uSeed: { value: seed },
       uRange: { value: GRASS_RANGE },
+      uIsPreview: { value: gameState === 'preview' ? 1.0 : 0.0 },
+      ...THREE.UniformsLib.fog,
     },
     vertexShader: `
       varying vec2 vUv;
       varying vec3 vWorldPos;
+      // #include <fog_pars_vertex>
       void main() {
         vUv = uv;
         vec4 worldPos = modelMatrix * vec4(position, 1.0);
         vWorldPos = worldPos.xyz;
         gl_Position = projectionMatrix * viewMatrix * worldPos;
+        // #include <fog_vertex>
       }
     `,
     fragmentShader: `
@@ -582,6 +620,8 @@ function IslandGround({ seed }: { seed: number }) {
       varying vec3 vWorldPos;
       uniform float uSeed;
       uniform float uRange;
+      uniform float uIsPreview;
+      // #include <fog_pars_fragment>
 
       float hash(vec2 p) {
         return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -618,31 +658,39 @@ function IslandGround({ seed }: { seed: number }) {
         // Blend ground with ocean at the edges for smoother transition
         float edgeSmoothing = 2.0;
         float mask = smoothstep(variedRadius, variedRadius - edgeSmoothing, r);
-        vec3 color = mix(oceanColor, groundColor, mask);
         
+        vec3 color = mix(oceanColor, groundColor, mask);
+      
         gl_FragColor = vec4(color, 1.0);
+        // #include <fog_fragment>
       }
-    `
-  }), [seed])
+    `,
+    fog: false,
+  }), [seed, gameState])
 
   return (
     <RigidBody type="fixed">
       <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
         <planeGeometry args={[GRASS_RANGE, GRASS_RANGE]} />
-        <shaderMaterial args={[shader]} />
+        <shaderMaterial attach="material" args={[shader]} fog={false} />
       </mesh>
     </RigidBody>
   )
 }
 
-export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefObject<THREE.Group | null> }) {
+export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, gameState: 'preview' | 'playing' }) {
   const [rockData, setRockData] = useState<{ x: number, z: number, radius: number }[]>([])
   
   return (
     <KeyboardControls map={keyboardMap}>
-      <Canvas shadows camera={{ position: [0, 5, 7], fov: 75 }}>
-        <fog attach="fog" args={["#87ceeb", 20, 160]} />
-        <PointerLockControls pointerSpeed={4} />
+      <Canvas shadows camera={{ position: [0, 150, 150], fov: 60 }} gl={{ antialias: true }}>
+        <color attach="background" args={["#87ceeb"]} />
+        {/* {gameState === 'playing' ? (
+          <fog attach="fog" args={["#87ceeb", 20, 160]} />
+        ) : (
+          <fog attach="fog" args={["#87ceeb", 300, 500]} />
+        )} */}
+        {gameState === 'playing' && <PointerLockControls pointerSpeed={4} />}
         <Sky sunPosition={[100, 20, 100]} turbidity={0.1} rayleigh={0.5} />
         <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
         <Environment preset="park" />
@@ -660,12 +708,12 @@ export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefO
         />
         
         <Physics gravity={[0, -9.81, 0]} interpolate={false}>
-          <Player ref={playerRef} />
+          <Player ref={playerRef} gameState={gameState} />
           
-          <IslandGround seed={seed} />
+          <IslandGround seed={seed} gameState={gameState} />
 
           <Rocks seed={seed} onRockData={setRockData} />
-          <Grass seed={seed} playerRef={playerRef} rockData={rockData} />
+          <Grass seed={seed} playerRef={playerRef} rockData={rockData} gameState={gameState} />
           <Flowers seed={seed} rockData={rockData} />
         </Physics>
 

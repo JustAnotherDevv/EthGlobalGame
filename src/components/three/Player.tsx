@@ -12,7 +12,7 @@ const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 5, 7)
 
-export const Player = forwardRef<THREE.Group>((_, ref) => {
+export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
   const rb = useRef<RapierRigidBody>(null)
   const groupRef = useRef<THREE.Group>(null)
   const [, getKeys] = useKeyboardControls()
@@ -22,6 +22,13 @@ export const Player = forwardRef<THREE.Group>((_, ref) => {
 
   useFrame((state, delta) => {
     if (!rb.current || !groupRef.current) return
+
+    // If in preview mode, position the camera to look at the island from above
+    if (gameState === 'preview') {
+      state.camera.position.lerp(new THREE.Vector3(0, 150, 150), 0.05)
+      state.camera.lookAt(0, 0, 0)
+      return
+    }
 
     const { forward, backward, left, right, jump } = getKeys()
 
