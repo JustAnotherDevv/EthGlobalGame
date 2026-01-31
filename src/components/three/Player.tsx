@@ -4,7 +4,7 @@ import { useKeyboardControls } from "@react-three/drei"
 import { RapierRigidBody, RigidBody, CapsuleCollider } from "@react-three/rapier"
 import * as THREE from "three"
 
-const SPEED = 5
+const SPEED = 3
 const direction = new THREE.Vector3()
 const frontVector = new THREE.Vector3()
 const sideVector = new THREE.Vector3()
@@ -13,6 +13,7 @@ const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 5, 7)
 
 export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
+  const smoothedY = useRef(0)
   const rb = useRef<RapierRigidBody>(null)
   const groupRef = useRef<THREE.Group>(null)
   const [, getKeys] = useKeyboardControls()
@@ -34,7 +35,31 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
 
     // Sync group position with physics for external ref access
     const translation = rb.current.translation()
-    groupRef.current.position.set(translation.x, translation.y, translation.z)
+    const rbVelocity = rb.current.linvel()
+    
+    // Check if we are grounded to decide on smoothing
+    // Increased threshold slightly to better handle small physics bounces
+    const isGrounded = Math.abs(rbVelocity.y) < 0.2
+    
+    // Smooth Y movement for camera to prevent "head bobbing"
+    // We use a much slower lerp for Y when on ground, but faster when jumping/falling
+    // EVEN SLOWER lerp when grounded (0.01) to filter out terrain micro-variations
+    const yLerpFactor = isGrounded ? 0.01 : 0.15
+    // SMOOTHING OVERRIDE: If movement is minimal and grounded, lock Y
+    const isMoving = Math.hypot(rbVelocity.x, rbVelocity.z) > 0.1
+    if (isGrounded && !isMoving) {
+        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current, translation.y, 0.002)
+    } else {
+        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current || translation.y, translation.y, yLerpFactor)
+    }
+
+    // Update group position - use smoothed Y when grounded to avoid micro-bounces
+    // but keep X and Z reactive to physics
+    groupRef.current.position.set(
+      translation.x, 
+      isGrounded ? (smoothedY.current || translation.y) : translation.y, 
+      translation.z
+    )
 
     // Get camera orientation
     const camera = state.camera
@@ -56,7 +81,11 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     
     targetVelocity.copy(direction).multiplyScalar(SPEED)
     
-    const rbVelocity = rb.current.linvel()
+    // rbVelocity already declared above
+    // const rbVelocity = rb.current.linvel()
+
+    // Increase vertical offset for camera lookAt to center player better
+    const verticalLookAtOffset = 1.5;
 
     // Use lerp for smoother velocity transitions
     const lerpFactor = 1 - Math.pow(0.001, delta)
@@ -80,22 +109,26 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     
     cameraOffset.copy(idealOffset).applyQuaternion(yawQuaternion)
     
-    // To reduce jitter, we can lerp the camera position too
+    // Target position for the camera
     const targetX = translation.x + cameraOffset.x
-    const targetY = translation.y + cameraOffset.y
+    const targetY = (isGrounded ? smoothedY.current : translation.y) + cameraOffset.y
     const targetZ = translation.z + cameraOffset.z
 
-    camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, 0.1)
-    camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, 0.1)
-    camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, 0.1)
+    // IMPROVEMENT: Decouple horizontal and vertical smoothing
+    // We want X and Z to be very responsive (no lerp or very high lerp)
+    // while Y remains smoothly filtered.
+    camera.position.x = targetX
+    camera.position.z = targetZ
+    
+    // Only lerp the Y position to filter out terrain bumps
+    const verticalLerpFactor = isGrounded ? 0.05 : 0.2
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, verticalLerpFactor)
     
     // Smoothly interpolate the lookAt point as well
     const lookAtX = translation.x
-    const lookAtY = translation.y + 1
+    const lookAtY = (isGrounded ? smoothedY.current : translation.y) + verticalLookAtOffset
     const lookAtZ = translation.z
     
-    // We can use a helper vector to lerp the lookAt target if needed, 
-    // but camera.lookAt every frame is usually fine if position is smooth.
     camera.lookAt(lookAtX, lookAtY, lookAtZ)
   })
 
@@ -105,7 +138,6 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
       colliders={false}
       enabledRotations={[false, false, false]}
       position={[0, 1, 0]}
-      includeInPhysics={gameState !== 'preview'}
     >
       <group ref={groupRef} />
       <CapsuleCollider args={[0.5, 0.5]} />
