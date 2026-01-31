@@ -16,6 +16,15 @@ function mulberry32(a: number) {
 }
 
 // 2D Noise for island shape and wind
+function hash2D(p: number[]) {
+  const x = Math.sin(p[0] * 127.1 + p[1] * 311.7) * 43758.5453123;
+  return x - Math.floor(x);
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + t * (b - a);
+}
+
 function noise2D(x: number, y: number) {
   const i = Math.floor(x);
   const j = Math.floor(y);
@@ -24,38 +33,60 @@ function noise2D(x: number, y: number) {
   const sx = fx * fx * (3.0 - 2.0 * fx);
   const sy = fy * fy * (3.0 - 2.0 * fy);
 
-  const hash = (p: number[]) => {
-    const x = Math.sin(p[0] * 127.1 + p[1] * 311.7) * 43758.5453123;
-    return x - Math.floor(x);
-  };
+  const n00 = hash2D([i, j]);
+  const n10 = hash2D([i + 1, j]);
+  const n01 = hash2D([i, j + 1]);
+  const n11 = hash2D([i + 1, j + 1]);
 
-  const n00 = hash([i, j]);
-  const n10 = hash([i + 1, j]);
-  const n01 = hash([i, j + 1]);
-  const n11 = hash([i + 1, j + 1]);
-
-  return (1 - sy) * ((1 - sx) * n00 + sx * n10) + sy * ((1 - sx) * n01 + sx * n11);
+  return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
 }
 
-function getIslandShape(x: number, z: number, seed: number) {
-  const r = Math.sqrt(x * x + z * z);
+function fbm(x: number, y: number, seed: number) {
+  let value = 0.0;
+  let amplitude = 0.5;
+  let frequency = 1.0;
+  for (let i = 0; i < 5; i++) {
+    value += amplitude * noise2D(x * frequency + seed, y * frequency + seed);
+    frequency *= 2.0;
+    amplitude *= 0.5;
+  }
+  return value;
+}
+
+function getIslandShape(x: number, z: number, seed: number, isVegetation = false) {
   const maxR = GRASS_RANGE / 2;
   
-  // Base circular falloff
-  if (r > maxR) return 0;
+  // Normalize coordinates
+  let nx = x / maxR;
+  let nz = z / maxR;
   
-  // Add noise to the radius
-  const angle = Math.atan2(z, x);
-  const noiseScale = 0.5;
-  const noiseStrength = 15.0;
+  // Domain warping for more interesting shapes
+  const warpScale = 0.8;
+  const qx = fbm(nx * warpScale, nz * warpScale, seed + 12.3);
+  const qz = fbm(nx * warpScale + 5.2, nz * warpScale + 1.3, seed + 45.6);
   
-  // Multi-layered noise for more interesting shape
-  const n1 = noise2D(Math.cos(angle) * noiseScale + seed, Math.sin(angle) * noiseScale + seed);
-  const n2 = noise2D(Math.cos(angle) * noiseScale * 2.0 + seed * 1.5, Math.sin(angle) * noiseScale * 2.0 + seed * 1.5) * 0.5;
+  nx += qx * 0.4;
+  nz += qz * 0.4;
   
-  const variedRadius = maxR - (n1 + n2) * noiseStrength;
+  // Fractal noise with warped coordinates
+  const islandScale = 1.5;
+  const n = fbm(nx * 1.8, nz * 1.8, seed) * islandScale;
   
-  return r < variedRadius ? 1 : 0;
+  // Distance from center falloff
+  const d = Math.sqrt(nx * nx + nz * nz);
+  
+  // Multiplicative radial mask - even more aggressive to prevent edge clipping
+  const radialMask = Math.max(0, 1.0 - Math.pow(d, 2.0));
+  
+  // Central bias to ensure a solid core
+  const centralBias = Math.max(0, 0.4 * (1.0 - d * 2.0));
+  
+  // Final shape calculation - stronger falloff at the edges
+  const islandValue = (n * radialMask) - (Math.pow(d, 5.0) * 0.8) + centralBias;
+  
+  const edgeThreshold = 0.12;
+  const objectThreshold = 0.25;
+  return islandValue > (isVegetation ? objectThreshold : edgeThreshold) ? 1 : 0;
 }
 
 const keyboardMap = [
@@ -86,7 +117,7 @@ function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: nu
       const z = r * Math.sin(theta)
       
       // Check if inside island
-      if (getIslandShape(x, z, seed) === 0) continue;
+      if (getIslandShape(x, z, seed, true) === 0) continue;
 
       const scaleX = 2 + random() * 4
       const scaleY = 1 + random() * 3
@@ -151,8 +182,8 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
       const x = r * Math.cos(theta)
       const z = r * Math.sin(theta)
       
-      // Check if inside island
-      if (getIslandShape(x, z, seed) === 0) continue;
+      // Check if inside island - use a slightly more conservative check for grass
+      if (getIslandShape(x, z, seed, true) === 0) continue;
 
       // Check for rock collision
       let tooClose = false;
@@ -283,7 +314,12 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
           }
 
           // Reduce density in preview mode or when far away in playing mode
-          float threshold = uIsPreview > 0.5 ? 0.2 : densityThreshold + 0.15;
+          if (uIsPreview > 0.5) {
+            gl_Position = vec4(0.0);
+            return;
+          }
+          
+          float threshold = densityThreshold + 0.15;
           if (h > threshold) {
             gl_Position = vec4(0.0);
             return;
@@ -480,7 +516,7 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
   )
 }
 
-function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: number, radius: number }[] }) {
+function Flowers({ seed, rockData, gameState }: { seed: number, rockData: { x: number, z: number, radius: number }[], gameState: 'preview' | 'playing' }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const materialRef = useRef<THREE.ShaderMaterial>(null)
   const FLOWER_COUNT = 400
@@ -498,8 +534,8 @@ function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: n
       const x = r * Math.cos(theta)
       const z = r * Math.sin(theta)
 
-      // Check if inside island
-      if (getIslandShape(x, z, seed) === 0) continue;
+      // Check if inside island - use a slightly more conservative check for flowers
+      if (getIslandShape(x, z, seed, true) === 0 || gameState === 'preview') continue;
 
       // Check for rock collision
       let tooClose = false;
@@ -635,36 +671,67 @@ function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' 
                    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
       }
 
+      float fbm(vec2 p) {
+        float value = 0.0;
+        float amplitude = 0.5;
+        float frequency = 1.0;
+        for (int i = 0; i < 5; i++) {
+          value += amplitude * noise(p * frequency + uSeed);
+          frequency *= 2.0;
+          amplitude *= 0.5;
+        }
+        return value;
+      }
+
       void main() {
         float x = vWorldPos.x;
         float z = vWorldPos.z;
-        float r = length(vWorldPos.xz);
         float maxR = uRange / 2.0;
         
-        float angle = atan(z, x);
-        float noiseScale = 0.5;
-        float noiseStrength = 15.0;
+        // Normalize coordinates for FBM
+        vec2 np = vWorldPos.xz / maxR;
         
-        float n1 = noise(vec2(cos(angle) * noiseScale + uSeed, sin(angle) * noiseScale + uSeed));
-        float n2 = noise(vec2(cos(angle) * noiseScale * 2.0 + uSeed * 1.5, sin(angle) * noiseScale * 2.0 + uSeed * 1.5)) * 0.5;
+        // Domain warping for more interesting shapes (Matching TS logic)
+        float warpScale = 0.8;
+        float qx = fbm(np * warpScale + 12.3);
+        float qz = fbm(np * warpScale + vec2(5.2, 1.3) + 45.6);
         
-        float variedRadius = maxR - (n1 + n2) * noiseStrength;
+        vec2 warpedNp = np + vec2(qx, qz) * 0.4;
+        
+        float islandScale = 1.5;
+        float n = fbm(warpedNp * 1.8) * islandScale;
+        
+        // Distance from center falloff using warped coordinates
+        float d = length(warpedNp);
+        float radialMask = max(0.0, 1.0 - pow(d, 2.0));
+        float centralBias = max(0.0, 0.4 * (1.0 - d * 2.0));
+        float islandValue = (n * radialMask) - (pow(d, 5.0) * 0.8) + centralBias;
         
         // Ground color with some subtle variation
         float detail = noise(vWorldPos.xz * 0.2);
-        vec3 groundColor = mix(vec3(0.17, 0.35, 0.15), vec3(0.2, 0.4, 0.18), detail);
+        vec3 grassColor = mix(vec3(0.17, 0.35, 0.15), vec3(0.2, 0.4, 0.18), detail);
+        vec3 sandColor = mix(vec3(0.76, 0.7, 0.5), vec3(0.8, 0.75, 0.55), detail);
         vec3 oceanColor = vec3(0.0, 0.44, 0.62);
 
-        // Blend ground with ocean at the edges for smoother transition
-        float edgeSmoothing = 2.0;
-        float mask = smoothstep(variedRadius, variedRadius - edgeSmoothing, r);
+        // Define zones: Island center -> Grass -> Sand -> Ocean
+        float edgeThreshold = 0.12;
+        float beachWidth = 0.12;
         
-        vec3 color = mix(oceanColor, groundColor, mask);
+        // Smooth transitions between zones
+        float sandMask = smoothstep(edgeThreshold - 0.05, edgeThreshold + 0.05, islandValue);
+        float grassMask = smoothstep(edgeThreshold + beachWidth - 0.05, edgeThreshold + beachWidth + 0.05, islandValue);
+        
+        vec3 finalGroundColor = mix(sandColor, grassColor, grassMask);
+        vec3 color = mix(oceanColor, finalGroundColor, sandMask);
+        
+        // Discard or alpha-blend edges of the 200x200 plane to reveal the infinite ocean below
+        float alpha = smoothstep(0.9, 0.8, d); // d is distance from center in normalized units
+        if (alpha < 0.01) discard;
       
-        gl_FragColor = vec4(color, 1.0);
-        // #include <fog_fragment>
+        gl_FragColor = vec4(color, alpha);
       }
     `,
+    transparent: true,
     fog: false,
   }), [seed, gameState])
 
@@ -675,6 +742,59 @@ function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' 
         <shaderMaterial attach="material" args={[shader]} fog={false} />
       </mesh>
     </RigidBody>
+  )
+}
+
+function Ocean() {
+  const shader = useMemo(() => ({
+    uniforms: {
+      uTime: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform float uTime;
+
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+
+      void main() {
+        vec2 uv = vUv * 1000.0;
+        float n = noise(uv + uTime * 0.2);
+        vec3 baseColor = vec3(0.0, 0.44, 0.62);
+        vec3 shallowColor = vec3(0.0, 0.55, 0.7);
+        vec3 color = mix(baseColor, shallowColor, n * 0.2);
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `
+  }), [])
+
+  useFrame((state) => {
+    if (shader.uniforms.uTime) {
+      shader.uniforms.uTime.value = state.clock.elapsedTime
+    }
+  })
+
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.7, 0]}>
+      <circleGeometry args={[2000, 32]} />
+      <shaderMaterial attach="material" args={[shader]} />
+    </mesh>
   )
 }
 
@@ -711,10 +831,11 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
           <Player ref={playerRef} gameState={gameState} />
           
           <IslandGround seed={seed} gameState={gameState} />
+          <Ocean />
 
           <Rocks seed={seed} onRockData={setRockData} />
           <Grass seed={seed} playerRef={playerRef} rockData={rockData} gameState={gameState} />
-          <Flowers seed={seed} rockData={rockData} />
+          <Flowers seed={seed} rockData={rockData} gameState={gameState} />
         </Physics>
 
         <ContactShadows
