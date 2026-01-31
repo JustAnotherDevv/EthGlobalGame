@@ -1,4 +1,4 @@
-import { useRef } from "react"
+import { useRef, useImperativeHandle, forwardRef } from "react"
 import { useFrame } from "@react-three/fiber"
 import { useKeyboardControls } from "@react-three/drei"
 import { RapierRigidBody, RigidBody, CapsuleCollider } from "@react-three/rapier"
@@ -12,14 +12,22 @@ const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 2, 5)
 
-export function Player() {
+export const Player = forwardRef<THREE.Group>((_, ref) => {
   const rb = useRef<RapierRigidBody>(null)
+  const groupRef = useRef<THREE.Group>(null)
   const [, getKeys] = useKeyboardControls()
 
+  // Expose the internal group/position to the parent via ref
+  useImperativeHandle(ref, () => groupRef.current!)
+
   useFrame((state, delta) => {
-    if (!rb.current) return
+    if (!rb.current || !groupRef.current) return
 
     const { forward, backward, left, right, jump } = getKeys()
+
+    // Sync group position with physics for external ref access
+    const translation = rb.current.translation()
+    groupRef.current.position.set(translation.x, translation.y, translation.z)
 
     // Get camera orientation
     const camera = state.camera
@@ -58,7 +66,6 @@ export function Player() {
 
     // Camera follow (GTA-style third person)
     // Use the character's position and smoothly follow it
-    const translation = rb.current.translation()
     
     // Only use the horizontal rotation (yaw) for the camera offset to avoid top-down flipping
     const cameraEuler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
@@ -92,6 +99,7 @@ export function Player() {
       enabledRotations={[false, false, false]}
       position={[0, 1, 0]}
     >
+      <group ref={groupRef} />
       <CapsuleCollider args={[0.5, 0.5]} />
       <mesh castShadow>
         <capsuleGeometry args={[0.5, 1]} />
@@ -99,4 +107,4 @@ export function Player() {
       </mesh>
     </RigidBody>
   )
-}
+})
