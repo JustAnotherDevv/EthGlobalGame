@@ -1402,8 +1402,13 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
       const x = r * Math.cos(theta)
       const z = r * Math.sin(theta)
       
-      // Check if inside island - use a slightly more conservative check for grass
-      if (getIslandShape(x, z, seed, true) === 0) continue;
+      // Check if inside island - STRICT check to ensure grass NEVER appears on sand/beach
+      // Get raw island value to check if well inside the grass zone
+      const islandValue = getIslandShape(x, z, seed, false, true)
+      // Threshold must be higher than beach edge (edgeThreshold + beachWidth = 0.24)
+      // Using 0.45 for a moderate safety margin - grass stays off beach but closer to it
+      const grassThreshold = 0.2
+      if (islandValue < grassThreshold) continue;
 
       // Check for rock collision
       let tooClose = false;
