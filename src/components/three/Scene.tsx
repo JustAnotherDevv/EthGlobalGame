@@ -102,6 +102,275 @@ const MID_GRASS_COUNT = 60000
 const FAR_GRASS_COUNT = 50000
 const GRASS_RANGE = 200
 const ROCK_COUNT = 30
+const PALM_COUNT = 40
+
+function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: number, z: number, radius: number }[], leafGeometry: THREE.BufferGeometry }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const trunkMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  const leafMaterialRef = useRef<THREE.ShaderMaterial>(null)
+  
+  const palms = useMemo(() => {
+    const random = mulberry32(seed * 55555);
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < PALM_COUNT && attempts < 2000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.2)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      if (getIslandShape(x, z, seed, true) === 0) continue;
+
+      let tooClose = false;
+      for (const rock of rockData) {
+        const dx = x - rock.x;
+        const dz = z - rock.z;
+        if (dx*dx + dz*dz < (rock.radius + 3) * (rock.radius + 3)) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      for (const palm of data) {
+        const dx = x - palm.x;
+        const dz = z - palm.z;
+        if (dx*dx + dz*dz < 64) { // 8 units apart
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      const height = 4 + random() * 3
+      const rotationY = random() * Math.PI * 2
+      const leafCount = 12 + Math.floor(random() * 4)
+      const trunkLean = (random() - 0.5) * 0.15
+      const trunkLeanDir = random() * Math.PI * 2
+      
+      data.push({ x, z, height, rotationY, trunkLean, trunkLeanDir, leafCount })
+      i++
+    }
+    return data
+  }, [seed, rockData])
+
+  const trunkShader = useMemo(() => ({
+    uniforms: {
+      uTime: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      uniform float uTime;
+      
+      void main() {
+        vUv = uv;
+        
+        vec3 pos = position;
+        
+        // Bend the trunk
+        // We use (pos.y + 0.5) / 1.0 as the height factor since cylinder is height 1 centered at 0
+        float h = pos.y + 0.5;
+        float bend = pow(h, 2.0) * 1.2;
+        pos.x += bend;
+        
+        // Slight sway
+        vec4 instancePosition = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float swayTime = uTime * 0.5 + instancePosition.x * 0.05 + instancePosition.z * 0.05;
+        pos.x += sin(swayTime) * 0.1 * h;
+        pos.z += cos(swayTime) * 0.1 * h;
+        
+        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(pos, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      void main() {
+        // Vertical gradient and ring detail
+        vec3 color1 = vec3(0.36, 0.25, 0.22); // #5d4037
+        vec3 color2 = vec3(0.31, 0.2, 0.18);  // #4e342e
+        
+        float ring = step(0.5, fract(vUv.y * 10.0));
+        vec3 color = mix(color1, color2, ring);
+        
+        // Add some noise/texture based on UV
+        color *= (0.9 + 0.2 * sin(vUv.x * 20.0));
+        
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+  }), [])
+
+  const leafShader = useMemo(() => ({
+    uniforms: {
+      uTime: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vInstanceColor;
+      uniform float uTime;
+      
+      void main() {
+        vUv = uv;
+        vInstanceColor = instanceColor;
+        
+        vec3 pos = position;
+        
+        // Taper the leaf geometry toward the tip
+        float taper = 1.0 - uv.y * 0.8;
+        pos.x *= taper;
+        
+        // Bend the leaf downward (quadratic)
+        // We use uv.y as the distance along the leaf
+        float bend = pow(uv.y, 1.5) * 5.0; 
+        pos.z += bend;
+        
+        // Dynamic sway
+        vec4 instancePosition = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float swayTime = uTime * 1.5 + instancePosition.x * 0.1 + instancePosition.z * 0.1;
+        float sway = sin(swayTime) * 0.15;
+        float rustle = sin(uTime * 5.0 + instancePosition.y) * 0.02;
+        
+        pos.x += (sway + rustle) * uv.y;
+        pos.z += (sway * 0.5) * uv.y;
+        
+        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(pos, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      varying vec3 vInstanceColor;
+      void main() {
+        // Vertical gradient
+        vec3 baseColor = vInstanceColor * 0.7;
+        vec3 tipColor = vInstanceColor * 1.3;
+        vec3 color = mix(baseColor, tipColor, vUv.y);
+        
+        // Mid-rib detail
+        float midRib = 1.0 - smoothstep(0.0, 0.05, abs(vUv.x));
+        color *= (1.0 + midRib * 0.2);
+
+        // Subtle fringe detail
+        float fringe = sin(vUv.x * 60.0) * 0.05 * vUv.y;
+        color += fringe;
+
+        // Fake depth shading
+        color *= (0.8 + 0.4 * abs(vUv.x * 2.0));
+
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+  }), [])
+
+  const setTrunkInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    palms.forEach((palm, i) => {
+      dummy.position.set(palm.x, palm.height / 2, palm.z)
+      dummy.rotation.set(palm.trunkLean, palm.trunkLeanDir, 0)
+      dummy.scale.set(0.6, palm.height, 0.6) // Thicker: 0.6 instead of 0.4-0.2
+      
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  const setLeafInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    const random = mulberry32(seed * 77777);
+    let totalIdx = 0
+    palms.forEach((palm) => {
+      const palmTopOffset = palm.height;
+      // In shader: pos.x += pow(h, 2.0) * 1.2; where h goes from 0 to 1
+      // At top, h = 1.0, so bend is 1.2. 
+      // This x-offset is in the LOCAL space of the trunk after trunkLean rotation.
+      const localBendX = 1.2 * 0.6; // 1.2 units of bend * scale.x (which is 0.6)
+      
+      // We need to find the top of the trunk in world space.
+      // The trunk is height `palm.height`, centered at `palm.height / 2` (locally).
+      // Local top is (0, palm.height / 2, 0) but we need to account for shader bend.
+      // Shader bend is applied to `pos` before `instanceMatrix` in my shader? 
+      // Wait, let's look at shader: 
+      // gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(pos, 1.0);
+      // Yes, bend is in local space of the cylinder (height 1, centered at 0).
+      // So at h=1 (top), pos.x += 1.2.
+      // After scale(0.6, height, 0.6), top is at (1.2 * 0.6, height/2, 0) in "instanced local" space.
+      // Then instanceMatrix moves it to palm position and rotates it.
+      
+      const localTop = new THREE.Vector3(1.2 * 0.6, 0.5, 0);
+      const worldTop = localTop.clone()
+        .multiply(new THREE.Vector3(1, palm.height, 1))
+        .applyEuler(new THREE.Euler(palm.trunkLean, palm.trunkLeanDir, 0))
+        .add(new THREE.Vector3(palm.x, palm.height / 2, palm.z));
+
+      for (let j = 0; j < palm.leafCount; j++) {
+        const angle = (j * Math.PI * 2) / palm.leafCount + palm.rotationY;
+        const leafLen = 7.0 + random() * 4.0; 
+        const leafWidth = 1.0 + random() * 0.5;
+        
+        dummy.position.copy(worldTop)
+        // Rotate leaf to point outwards and tilt down significantly
+        const downwardTilt = 0.6 + random() * 0.4;
+        dummy.rotation.set(downwardTilt, angle, 0, 'YXZ')
+        dummy.scale.set(leafWidth, leafLen, 1)
+        
+        dummy.updateMatrix()
+        mesh.setMatrixAt(totalIdx, dummy.matrix)
+        
+        // Better tropical green colors
+        const leafColor = new THREE.Color().setHSL(0.25 + random() * 0.1, 0.6, 0.4 + random() * 0.2);
+        mesh.setColorAt(totalIdx, leafColor)
+        totalIdx++
+      }
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  }
+
+  useFrame((state) => {
+    if (leafMaterialRef.current) {
+      leafMaterialRef.current.uniforms.uTime.value = state.clock.elapsedTime
+    }
+    if (trunkMaterialRef.current) {
+      trunkMaterialRef.current.uniforms.uTime.value = state.clock.elapsedTime
+    }
+  })
+
+  const totalLeafSegments = useMemo(() => palms.reduce((acc, p) => acc + p.leafCount, 0), [palms])
+
+  return (
+    <group>
+      {palms.map((palm, i) => (
+        <RigidBody key={i} type="fixed" colliders="cuboid" position={[palm.x, palm.height / 2, palm.z]} rotation={[palm.trunkLean, palm.trunkLeanDir, 0]}>
+          <mesh visible={false}>
+            <boxGeometry args={[0.8, palm.height, 0.8]} />
+          </mesh>
+        </RigidBody>
+      ))}
+
+      <instancedMesh ref={setTrunkInstances} args={[undefined, undefined, palms.length]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.4, 0.5, 1, 10, 10]} />
+        <shaderMaterial 
+          ref={trunkMaterialRef} 
+          args={[trunkShader]} 
+          side={THREE.DoubleSide} 
+          transparent={true}
+        />
+      </instancedMesh>
+
+      <instancedMesh ref={setLeafInstances} args={[leafGeometry, undefined, totalLeafSegments]} castShadow receiveShadow>
+        <shaderMaterial 
+          ref={leafMaterialRef} 
+          args={[leafShader]} 
+          vertexColors 
+          side={THREE.DoubleSide} 
+          transparent={true}
+        />
+      </instancedMesh>
+    </group>
+  )
+}
 
 function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: number, z: number, radius: number }[]) => void }) {
   const rocks = useMemo(() => {
@@ -801,6 +1070,12 @@ function Ocean() {
 export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, gameState: 'preview' | 'playing' }) {
   const [rockData, setRockData] = useState<{ x: number, z: number, radius: number }[]>([])
   
+  const leafGeometry = useMemo(() => {
+    const geo = new THREE.PlaneGeometry(1, 1, 1, 8) // 8 vertical segments for smooth bending
+    geo.translate(0, 0.5, 0) // Origin at bottom center
+    return geo
+  }, [])
+  
   return (
     <KeyboardControls map={keyboardMap}>
       <Canvas shadows camera={{ position: [0, 150, 150], fov: 60 }} gl={{ antialias: true }}>
@@ -832,8 +1107,9 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
           
           <IslandGround seed={seed} gameState={gameState} />
           <Ocean />
-
+          
           <Rocks seed={seed} onRockData={setRockData} />
+          <Palms seed={seed} rockData={rockData} leafGeometry={leafGeometry} />
           <Grass seed={seed} playerRef={playerRef} rockData={rockData} gameState={gameState} />
           <Flowers seed={seed} rockData={rockData} gameState={gameState} />
         </Physics>
