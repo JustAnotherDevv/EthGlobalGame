@@ -98,6 +98,8 @@ const keyboardMap = [
   { name: "left", keys: ["ArrowLeft", "KeyA"] },
   { name: "right", keys: ["ArrowRight", "KeyD"] },
   { name: "jump", keys: ["Space"] },
+  { name: "run", keys: ["ShiftLeft", "ShiftRight"] },
+  { name: "action", keys: ["KeyE", "KeyF"] },
 ]
 
 const NEAR_GRASS_COUNT = 30000

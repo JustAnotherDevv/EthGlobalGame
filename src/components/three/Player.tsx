@@ -1,10 +1,12 @@
-import { useRef, useImperativeHandle, forwardRef } from "react"
+import { useRef, useImperativeHandle, forwardRef, useEffect, useState } from "react"
 import { useFrame } from "@react-three/fiber"
-import { useKeyboardControls } from "@react-three/drei"
+import { useKeyboardControls, useGLTF, useAnimations } from "@react-three/drei"
 import { RapierRigidBody, RigidBody, CapsuleCollider } from "@react-three/rapier"
 import * as THREE from "three"
 
 const SPEED = 3
+const RUN_SPEED = 6
+
 const direction = new THREE.Vector3()
 const frontVector = new THREE.Vector3()
 const sideVector = new THREE.Vector3()
@@ -16,7 +18,44 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
   const smoothedY = useRef(0)
   const rb = useRef<RapierRigidBody>(null)
   const groupRef = useRef<THREE.Group>(null)
+  const characterModelRef = useRef<THREE.Group>(null)
+  const isJumpPressed = useRef(false)
   const [, getKeys] = useKeyboardControls()
+
+  // Load character model
+  const { scene, animations } = useGLTF("/pirate.gltf")
+  const { actions } = useAnimations(animations, characterModelRef)
+  const [animation, setAnimation] = useState("Idle")
+
+  useEffect(() => {
+    // Play the current animation
+    const action = actions[animation]
+    if (action) {
+      // Faster crossfade for most animations (0.2s)
+      // but longer crossfade when transitioning to Jump_Idle for smoothness
+      const fadeDuration = (animation === "Jump_Idle") ? 0.4 : 0.2
+      
+      action.reset().fadeIn(fadeDuration).play()
+      
+      // If it's a Jump animation, we want it to be slower and freeze on the last frame
+      if (animation === "Jump") {
+          action.setLoop(THREE.LoopOnce, 1)
+          action.clampWhenFinished = true
+          action.timeScale = 0.5 // Slow down the jump launch animation
+      } else if (animation === "Sword" || animation === "Jump_Land") {
+          action.setLoop(THREE.LoopOnce, 1)
+          action.clampWhenFinished = true
+          action.timeScale = 1.0
+      } else {
+          action.setLoop(THREE.LoopRepeat, Infinity)
+          action.timeScale = 1.0
+      }
+
+      return () => {
+        action.fadeOut(fadeDuration)
+      }
+    }
+  }, [animation, actions])
 
   // Expose the internal group/position to the parent via ref
   useImperativeHandle(ref, () => groupRef.current!)
@@ -31,7 +70,7 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
 
     if (!rb.current || !groupRef.current) return
 
-    const { forward, backward, left, right, jump } = getKeys()
+    const { forward, backward, left, right, jump, run, action } = getKeys()
 
     // Sync group position with physics for external ref access
     const translation = rb.current.translation()
@@ -48,7 +87,7 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     // SMOOTHING OVERRIDE: If movement is minimal and grounded, lock Y
     const isMoving = Math.hypot(rbVelocity.x, rbVelocity.z) > 0.1
     if (isGrounded && !isMoving) {
-        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current, translation.y, 0.002)
+        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current || translation.y, translation.y, 0.002)
     } else {
         smoothedY.current = THREE.MathUtils.lerp(smoothedY.current || translation.y, translation.y, yLerpFactor)
     }
@@ -79,7 +118,69 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
       direction.normalize()
     }
     
-    targetVelocity.copy(direction).multiplyScalar(SPEED)
+    const currentSpeed = run ? RUN_SPEED : SPEED
+    targetVelocity.copy(direction).multiplyScalar(currentSpeed)
+    
+    // Character rotation
+    if (direction.length() > 0 && characterModelRef.current) {
+        const targetRotation = Math.atan2(direction.x, direction.z)
+        
+        // Manual lerpAngle implementation
+        let diff = targetRotation - characterModelRef.current.rotation.y
+        while (diff < -Math.PI) diff += Math.PI * 2
+        while (diff > Math.PI) diff -= Math.PI * 2
+        characterModelRef.current.rotation.y += diff * 0.15
+    }
+
+    // Animation state
+    let nextAnimation = animation
+    if (!isGrounded) {
+        // Only trigger "Jump" when we just left the ground and have upward velocity
+        const isActuallyJumping = rbVelocity.y > 1.0;
+        
+        if (isActuallyJumping && animation !== "Jump" && animation !== "Jump_Idle") {
+            nextAnimation = "Jump"
+        } else if (animation === "Jump") {
+            // Smoothly transition from Jump to Jump_Idle near the apex or when falling
+            // Using a slightly positive threshold (0.5) to start the blend earlier for smoothness
+            if (rbVelocity.y < 0.5) {
+                nextAnimation = "Jump_Idle"
+            }
+        } else if (animation !== "Jump" && animation !== "Jump_Idle") {
+            // Fallback for falling without a jump (e.g. walking off a ledge)
+            nextAnimation = "Jump_Idle"
+        }
+    } else if (action) {
+        nextAnimation = "Sword"
+    } else if (isMoving) {
+        nextAnimation = run ? "Run" : "Walk"
+    } else {
+        // Check if we just landed
+        if (animation === "Jump_Idle" || animation === "Jump") {
+            nextAnimation = "Jump_Land"
+        } else if (animation === "Jump_Land") {
+            // Keep playing Jump_Land until it's almost done
+            const landAction = actions["Jump_Land"]
+            if (landAction && landAction.isRunning() && landAction.time < landAction.getClip().duration * 0.8) {
+                nextAnimation = "Jump_Land"
+            } else {
+                nextAnimation = "Idle"
+            }
+        } else if (animation === "Sword") {
+             const swordAction = actions["Sword"]
+             if (swordAction && swordAction.isRunning() && swordAction.time < swordAction.getClip().duration * 0.8) {
+                 nextAnimation = "Sword"
+             } else {
+                 nextAnimation = "Idle"
+             }
+        } else {
+            nextAnimation = "Idle"
+        }
+    }
+
+    if (nextAnimation !== animation) {
+        setAnimation(nextAnimation)
+    }
     
     // rbVelocity already declared above
     // const rbVelocity = rb.current.linvel()
@@ -95,8 +196,13 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     rb.current.setLinvel({ x: vx, y: rbVelocity.y, z: vz }, true)
 
     // Jump
-    if (jump && Math.abs(rbVelocity.y) < 0.05) {
-      rb.current.setLinvel({ x: vx, y: 5, z: vz }, true)
+    if (jump) {
+      if (isGrounded && !isJumpPressed.current && Math.abs(rbVelocity.y) < 0.1) {
+        rb.current.setLinvel({ x: vx, y: 7, z: vz }, true)
+      }
+      isJumpPressed.current = true
+    } else {
+      isJumpPressed.current = false
     }
 
     // Camera follow (GTA-style third person)
@@ -141,18 +247,20 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
   })
 
   return (
-    <RigidBody
-      ref={rb}
-      colliders={false}
-      enabledRotations={[false, false, false]}
-      position={[0, 1, 0]}
-    >
-      <group ref={groupRef} />
-      <CapsuleCollider args={[0.5, 0.5]} />
-      <mesh castShadow>
-        <capsuleGeometry args={[0.5, 1]} />
-        <meshStandardMaterial color="hotpink" />
-      </mesh>
-    </RigidBody>
+    <>
+      <RigidBody
+        ref={rb}
+        colliders={false}
+        enabledRotations={[false, false, false]}
+        position={[0, 1, 0]}
+      >
+        <CapsuleCollider args={[0.5, 0.5]} />
+      </RigidBody>
+      <group ref={groupRef}>
+        <group ref={characterModelRef} position={[0, -1, 0]}>
+            <primitive object={scene} />
+        </group>
+      </group>
+    </>
   )
 })

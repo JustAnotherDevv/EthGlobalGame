@@ -36,7 +36,9 @@ function App() {
           <h1 className="text-xl font-bold mb-2">3D Third Person Controller</h1>
           <p className="text-sm text-muted-foreground">
             Use <kbd className="px-1 border rounded bg-muted">WASD</kbd> to move<br />
+            Use <kbd className="px-1 border rounded bg-muted">Shift</kbd> to run<br />
             Use <kbd className="px-1 border rounded bg-muted">Space</kbd> to jump<br />
+            Use <kbd className="px-1 border rounded bg-muted">E</kbd> or <kbd className="px-1 border rounded bg-muted">F</kbd> for action<br />
             Click to look around
           </p>
         </div>
