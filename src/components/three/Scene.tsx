@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react"
+import { useMemo, useRef, useState } from "react"
 import { Canvas, useFrame } from "@react-three/fiber"
 import { KeyboardControls, Sky, Stars, ContactShadows, PointerLockControls, Environment } from "@react-three/drei"
 import { Physics, RigidBody } from "@react-three/rapier"
@@ -15,6 +15,49 @@ function mulberry32(a: number) {
   }
 }
 
+// 2D Noise for island shape and wind
+function noise2D(x: number, y: number) {
+  const i = Math.floor(x);
+  const j = Math.floor(y);
+  const fx = x - i;
+  const fy = y - j;
+  const sx = fx * fx * (3.0 - 2.0 * fx);
+  const sy = fy * fy * (3.0 - 2.0 * fy);
+
+  const hash = (p: number[]) => {
+    const x = Math.sin(p[0] * 127.1 + p[1] * 311.7) * 43758.5453123;
+    return x - Math.floor(x);
+  };
+
+  const n00 = hash([i, j]);
+  const n10 = hash([i + 1, j]);
+  const n01 = hash([i, j + 1]);
+  const n11 = hash([i + 1, j + 1]);
+
+  return (1 - sy) * ((1 - sx) * n00 + sx * n10) + sy * ((1 - sx) * n01 + sx * n11);
+}
+
+function getIslandShape(x: number, z: number, seed: number) {
+  const r = Math.sqrt(x * x + z * z);
+  const maxR = GRASS_RANGE / 2;
+  
+  // Base circular falloff
+  if (r > maxR) return 0;
+  
+  // Add noise to the radius
+  const angle = Math.atan2(z, x);
+  const noiseScale = 0.5;
+  const noiseStrength = 15.0;
+  
+  // Multi-layered noise for more interesting shape
+  const n1 = noise2D(Math.cos(angle) * noiseScale + seed, Math.sin(angle) * noiseScale + seed);
+  const n2 = noise2D(Math.cos(angle) * noiseScale * 2.0 + seed * 1.5, Math.sin(angle) * noiseScale * 2.0 + seed * 1.5) * 0.5;
+  
+  const variedRadius = maxR - (n1 + n2) * noiseStrength;
+  
+  return r < variedRadius ? 1 : 0;
+}
+
 const keyboardMap = [
   { name: "forward", keys: ["ArrowUp", "KeyW"] },
   { name: "backward", keys: ["ArrowDown", "KeyS"] },
@@ -24,11 +67,67 @@ const keyboardMap = [
 ]
 
 const NEAR_GRASS_COUNT = 60000
-const MID_GRASS_COUNT = 70000
-const FAR_GRASS_COUNT = 40000
-const GRASS_RANGE = 100
+const MID_GRASS_COUNT = 60000
+const FAR_GRASS_COUNT = 50000
+const GRASS_RANGE = 200
+const ROCK_COUNT = 30
 
-function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<THREE.Group | null> }) {
+function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: number, z: number, radius: number }[]) => void }) {
+  const rocks = useMemo(() => {
+    const random = mulberry32(seed * 67890);
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < ROCK_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.2)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      // Check if inside island
+      if (getIslandShape(x, z, seed) === 0) continue;
+
+      const scaleX = 2 + random() * 4
+      const scaleY = 1 + random() * 3
+      const scaleZ = 2 + random() * 4
+      
+      const rotationY = random() * Math.PI * 2
+      const rotationX = (random() - 0.5) * 0.4
+      const rotationZ = (random() - 0.5) * 0.4
+      
+      const gray = 0.3 + random() * 0.2
+      const color = new THREE.Color(gray, gray, gray)
+      
+      // Approximate radius for exclusion (using max horizontal scale)
+      const exclusionRadius = Math.max(scaleX, scaleZ) * 0.8
+      
+      data.push({ x, z, scaleX, scaleY, scaleZ, rotationX, rotationY, rotationZ, color, radius: exclusionRadius })
+      i++
+    }
+    onRockData(data.map(d => ({ x: d.x, z: d.z, radius: d.radius })))
+    return data
+  }, [seed, onRockData])
+
+  return (
+    <group>
+      {rocks.map((rock, i) => (
+        <RigidBody key={i} type="fixed" colliders="hull" position={[rock.x, rock.scaleY / 2 - 0.6, rock.z]} rotation={[rock.rotationX, rock.rotationY, rock.rotationZ]}>
+          <mesh castShadow receiveShadow>
+            <dodecahedronGeometry args={[1, 1]} />
+            <meshStandardMaterial color={rock.color} roughness={0.9} />
+          </mesh>
+          <mesh scale={[rock.scaleX, rock.scaleY, rock.scaleZ]}>
+            <dodecahedronGeometry args={[1, 0]} />
+            <meshStandardMaterial color={rock.color} roughness={0.9} />
+          </mesh>
+        </RigidBody>
+      ))}
+    </group>
+  )
+}
+
+function Grass({ seed, playerRef, rockData }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, rockData: { x: number, z: number, radius: number }[] }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const nearMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const midMaterialRef = useRef<THREE.ShaderMaterial>(null)
@@ -40,16 +139,36 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
     const mid = []
     const far = []
     
-    // Total count is now 170,000 (reduced from 200,000)
-    for (let i = 0; i < NEAR_GRASS_COUNT + MID_GRASS_COUNT + FAR_GRASS_COUNT; i++) {
+    // Total count is now 170,000 (increased for fullness, but with 3-tier LOD and stochastic culling)
+    let i = 0;
+    let attempts = 0;
+    const totalDesired = NEAR_GRASS_COUNT + MID_GRASS_COUNT + FAR_GRASS_COUNT;
+    while (i < totalDesired && attempts < totalDesired * 4) {
+      attempts++;
       // Use square root for uniform distribution in a circle
       const r = Math.sqrt(random()) * (GRASS_RANGE / 2)
       const theta = random() * 2 * Math.PI
       const x = r * Math.cos(theta)
       const z = r * Math.sin(theta)
       
-      const scaleY = 0.3 + random() * 0.5
-      const scaleXZ = 0.25 + random() * 0.35
+      // Check if inside island
+      if (getIslandShape(x, z, seed) === 0) continue;
+
+      // Check for rock collision
+      let tooClose = false;
+      for (const rock of rockData) {
+        const dx = x - rock.x;
+        const dz = z - rock.z;
+        if (dx*dx + dz*dz < rock.radius * rock.radius) {
+          tooClose = true;
+          break;
+        }
+      }
+      
+      if (tooClose) continue;
+
+      const scaleY = 0.5 + random() * 0.7
+      const scaleXZ = 0.45 + random() * 0.55
       const rotation = random() * Math.PI
       
       const h = 80 + random() * 60
@@ -57,7 +176,7 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
       const l = 25 + random() * 25
       const color = new THREE.Color(`hsl(${h}, ${s}%, ${l}%)`)
       
-      const lean = random() * 0.5
+      const lean = random() * 0.7
       const leanDirection = random() * Math.PI * 2
       
       const item = { x, z, scaleY, scaleXZ, rotation, color, lean, leanDirection }
@@ -69,26 +188,27 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
       } else {
         far.push(item)
       }
+      i++;
     }
     return { near, mid, far }
-  }, [seed])
+  }, [seed, rockData])
 
   const { nearGeometry, midGeometry, farGeometry, grassShader } = useMemo(() => {
     // Helper to create tapered plane geometry
     const createTaperedGeo = (segments: number) => {
-      const geo = new THREE.PlaneGeometry(0.6, 1, 1, segments)
+      const geo = new THREE.PlaneGeometry(0.8, 1, 1, segments)
       geo.translate(0, 0.5, 0)
       const pos = geo.attributes.position
       for (let i = 0; i < pos.count; i++) {
         const y = pos.getY(i)
-        const taper = 1.0 - Math.pow(y, 1.5)
+        const taper = 1.0 - Math.pow(y, 1.2)
         pos.setX(i, pos.getX(i) * taper)
-        pos.setZ(i, pos.getZ(i) + Math.pow(y, 2.0) * 0.2)
+        pos.setZ(i, pos.getZ(i) + Math.pow(y, 1.5) * 0.3)
       }
       return geo
     }
 
-    const nearGeo = createTaperedGeo(4)
+    const nearGeo = createTaperedGeo(3)
     const midGeo = createTaperedGeo(2)
     const farGeo = createTaperedGeo(1)
 
@@ -140,14 +260,20 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
           }
 
           float distToCamera = distance(worldInstancePos, uCameraPos);
-          float maxDist = 70.0;
+          float maxDist = 100.0;
+          float extremeDist = 180.0;
           
           // Optimization: Progressive density reduction for far grass
           // We use a pseudo-random value based on instance position to decide if we cull
           float h = hash(worldInstancePos.xz);
-          float densityThreshold = smoothstep(maxDist, maxDist * 0.4, distToCamera);
           
-          if (distToCamera > maxDist || h > densityThreshold + 0.15) {
+          // Smoothly reduce density from 40% of maxDist up to extremeDist
+          // Near/Mid distance: full density
+          // Far distance (maxDist): significantly reduced density
+          // Extreme distance: very low density (background layer)
+          float densityThreshold = smoothstep(extremeDist, maxDist * 0.3, distToCamera);
+          
+          if (distToCamera > extremeDist || h > densityThreshold + 0.05) {
             gl_Position = vec4(0.0);
             return;
           }
@@ -178,7 +304,8 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
           
           pos.x += pow(uv.y, 2.0) * 0.1;
 
-          float fadeOut = 1.0 - smoothstep(maxDist * 0.8, maxDist, distToCamera);
+          // Smoothly fade out to transparent/ground color at extreme distances
+          float fadeOut = 1.0 - smoothstep(extremeDist * 0.7, extremeDist, distToCamera);
           pos *= fadeOut;
 
           vec4 worldPos = modelMatrix * instanceMatrix * vec4(pos, 1.0);
@@ -193,16 +320,16 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
         
         void main() {
           // Simplified lighting/shading
-          vec3 baseColor = vInstanceColor * 0.3;
-          vec3 tipColor = mix(vInstanceColor, vec3(0.8, 1.0, 0.3), 0.3);
+          vec3 baseColor = vInstanceColor * 0.2;
+          vec3 tipColor = mix(vInstanceColor, vec3(0.9, 1.0, 0.4), 0.4);
           vec3 finalColor = mix(baseColor, tipColor, vUv.y);
           
           // Sub-surface scattering approximation
-          float translucency = vUv.y * vUv.y * 0.3;
+          float translucency = vUv.y * vUv.y * 0.4;
           finalColor += vec3(0.4, 0.5, 0.1) * translucency;
           
           // Side shading for volume
-          finalColor *= (0.6 + vUv.x * 0.4);
+          finalColor *= (0.5 + vUv.x * 0.5);
           
           // Tip highlight
           float highlight = smoothstep(0.4, 0.5, vUv.x) * smoothstep(0.6, 0.5, vUv.x);
@@ -321,7 +448,7 @@ function Grass({ seed, playerRef }: { seed: number, playerRef: React.RefObject<T
   )
 }
 
-function Flowers({ seed }: { seed: number }) {
+function Flowers({ seed, rockData }: { seed: number, rockData: { x: number, z: number, radius: number }[] }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const materialRef = useRef<THREE.ShaderMaterial>(null)
   const FLOWER_COUNT = 400
@@ -330,16 +457,36 @@ function Flowers({ seed }: { seed: number }) {
     const random = mulberry32(seed * 98765);
     const data = []
     const colors = ['#ff69b4', '#ffffff', '#ffff00', '#add8e6', '#dda0dd']
-    for (let i = 0; i < FLOWER_COUNT; i++) {
+    let i = 0;
+    let attempts = 0;
+    while (i < FLOWER_COUNT && attempts < 1000) {
+      attempts++;
       const r = Math.sqrt(random()) * (GRASS_RANGE / 2)
       const theta = random() * 2 * Math.PI
       const x = r * Math.cos(theta)
       const z = r * Math.sin(theta)
+
+      // Check if inside island
+      if (getIslandShape(x, z, seed) === 0) continue;
+
+      // Check for rock collision
+      let tooClose = false;
+      for (const rock of rockData) {
+        const dx = x - rock.x;
+        const dz = z - rock.z;
+        if (dx*dx + dz*dz < rock.radius * rock.radius) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
       const color = new THREE.Color(colors[Math.floor(random() * colors.length)])
       data.push({ x, z, color })
+      i++;
     }
     return data
-  }, [seed])
+  }, [seed, rockData])
 
   const flowerShader = useMemo(() => ({
     uniforms: {
@@ -359,7 +506,7 @@ function Flowers({ seed }: { seed: number }) {
         vec3 worldInstancePos = (modelMatrix * instancePosition).xyz;
         
         float distToCamera = distance(worldInstancePos, uCameraPos);
-        if (distToCamera > 60.0) {
+        if (distToCamera > 140.0) {
           gl_Position = vec4(0.0);
           return;
         }
@@ -367,6 +514,10 @@ function Flowers({ seed }: { seed: number }) {
         // Gentle sway
         vec3 pos = position;
         pos.x += sin(uTime + worldInstancePos.x) * 0.1 * uv.y;
+        
+        // Fade out flowers
+        float flowerFade = 1.0 - smoothstep(100.0, 140.0, distToCamera);
+        pos *= flowerFade;
         
         gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(pos, 1.0);
       }
@@ -410,11 +561,87 @@ function Flowers({ seed }: { seed: number }) {
   )
 }
 
+function IslandGround({ seed }: { seed: number }) {
+  const shader = useMemo(() => ({
+    uniforms: {
+      uSeed: { value: seed },
+      uRange: { value: GRASS_RANGE },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vWorldPos;
+      void main() {
+        vUv = uv;
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPos = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      varying vec3 vWorldPos;
+      uniform float uSeed;
+      uniform float uRange;
+
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), f.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+
+      void main() {
+        float x = vWorldPos.x;
+        float z = vWorldPos.z;
+        float r = length(vWorldPos.xz);
+        float maxR = uRange / 2.0;
+        
+        float angle = atan(z, x);
+        float noiseScale = 0.5;
+        float noiseStrength = 15.0;
+        
+        float n1 = noise(vec2(cos(angle) * noiseScale + uSeed, sin(angle) * noiseScale + uSeed));
+        float n2 = noise(vec2(cos(angle) * noiseScale * 2.0 + uSeed * 1.5, sin(angle) * noiseScale * 2.0 + uSeed * 1.5)) * 0.5;
+        
+        float variedRadius = maxR - (n1 + n2) * noiseStrength;
+        
+        // Ground color with some subtle variation
+        float detail = noise(vWorldPos.xz * 0.2);
+        vec3 groundColor = mix(vec3(0.17, 0.35, 0.15), vec3(0.2, 0.4, 0.18), detail);
+        vec3 oceanColor = vec3(0.0, 0.44, 0.62);
+
+        // Blend ground with ocean at the edges for smoother transition
+        float edgeSmoothing = 2.0;
+        float mask = smoothstep(variedRadius, variedRadius - edgeSmoothing, r);
+        vec3 color = mix(oceanColor, groundColor, mask);
+        
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `
+  }), [seed])
+
+  return (
+    <RigidBody type="fixed">
+      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
+        <planeGeometry args={[GRASS_RANGE, GRASS_RANGE]} />
+        <shaderMaterial args={[shader]} />
+      </mesh>
+    </RigidBody>
+  )
+}
+
 export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefObject<THREE.Group | null> }) {
+  const [rockData, setRockData] = useState<{ x: number, z: number, radius: number }[]>([])
+  
   return (
     <KeyboardControls map={keyboardMap}>
-      <Canvas shadows camera={{ position: [0, 2, 5], fov: 75 }}>
-        <fog attach="fog" args={["#87ceeb", 10, 80]} />
+      <Canvas shadows camera={{ position: [0, 5, 7], fov: 75 }}>
+        <fog attach="fog" args={["#87ceeb", 20, 160]} />
         <PointerLockControls pointerSpeed={4} />
         <Sky sunPosition={[100, 20, 100]} turbidity={0.1} rayleigh={0.5} />
         <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
@@ -425,7 +652,7 @@ export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefO
           position={[50, 50, 50]}
           intensity={1.5}
           castShadow
-          shadow-mapSize={[4096, 4096]}
+          shadow-mapSize={[2048, 2048]}
           shadow-camera-left={-50}
           shadow-camera-right={50}
           shadow-camera-top={50}
@@ -435,15 +662,11 @@ export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefO
         <Physics gravity={[0, -9.81, 0]} interpolate={false}>
           <Player ref={playerRef} />
           
-          <RigidBody type="fixed">
-            <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-              <circleGeometry args={[GRASS_RANGE / 2, 32]} />
-              <meshStandardMaterial color="#2d5a27" roughness={0.8} />
-            </mesh>
-          </RigidBody>
+          <IslandGround seed={seed} />
 
-          <Grass seed={seed} playerRef={playerRef} />
-          <Flowers seed={seed} />
+          <Rocks seed={seed} onRockData={setRockData} />
+          <Grass seed={seed} playerRef={playerRef} rockData={rockData} />
+          <Flowers seed={seed} rockData={rockData} />
         </Physics>
 
         <ContactShadows
@@ -451,7 +674,7 @@ export function Scene({ seed, playerRef }: { seed: number, playerRef: React.RefO
           scale={GRASS_RANGE}
           blur={1.5}
           far={10}
-          resolution={512}
+          resolution={256}
           color="#1a3317"
         />
       </Canvas>

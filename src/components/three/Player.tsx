@@ -10,7 +10,7 @@ const frontVector = new THREE.Vector3()
 const sideVector = new THREE.Vector3()
 const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
-const idealOffset = new THREE.Vector3(0, 2, 5)
+const idealOffset = new THREE.Vector3(0, 5, 7)
 
 export const Player = forwardRef<THREE.Group>((_, ref) => {
   const rb = useRef<RapierRigidBody>(null)
