@@ -13,6 +13,7 @@ const sideVector = new THREE.Vector3()
 const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 5, 7)
+const smoothedHorizontalRotation = { current: 0 }
 
 export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
   const smoothedY = useRef(0)
@@ -205,45 +206,54 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
       isJumpPressed.current = false
     }
 
-    // Camera follow (GTA-style third person)
-    // Use the character's position and smoothly follow it
-    
-    // Only use the horizontal rotation (yaw) for the camera offset to avoid top-down flipping
+    // Camera follow - Fixed third person behind player
+    // Smooth the horizontal rotation to eliminate jitter during fast mouse movements
+
+    // Extract horizontal (yaw) rotation from PointerLockControls
     const cameraEuler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
-    const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cameraEuler.y)
-    
+    const targetHorizontalRotation = cameraEuler.y
+
+    // Initialize smoothed rotation on first frame
+    if (smoothedHorizontalRotation.current === 0 && gameState === 'playing') {
+      smoothedHorizontalRotation.current = targetHorizontalRotation
+    }
+
+    // Smooth the rotation with proper angle wrapping
+    let angleDiff = targetHorizontalRotation - smoothedHorizontalRotation.current
+    // Normalize angle difference to [-PI, PI] for shortest path
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2
+
+    // Apply smoothing - higher value = more responsive, lower = smoother
+    const rotationSmoothFactor = 0.15
+    smoothedHorizontalRotation.current += angleDiff * rotationSmoothFactor
+
+    // Apply smoothed yaw to camera offset
+    const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 1, 0),
+      smoothedHorizontalRotation.current
+    )
     cameraOffset.copy(idealOffset).applyQuaternion(yawQuaternion)
-    
-    // Target position for the camera
+
+    // Calculate and apply smoothed camera position
     const targetX = translation.x + cameraOffset.x
     const targetY = (isGrounded ? (smoothedY.current || translation.y) : translation.y) + cameraOffset.y
     const targetZ = translation.z + cameraOffset.z
 
-    // IMPROVEMENT: Smoothed horizontal movement to eliminate jitter
-    // We use a high lerp factor for responsiveness but enough to filter micro-stutter
-    const horizontalLerpFactor = 1 - Math.pow(0.0001, delta)
-    camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, horizontalLerpFactor)
-    camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, horizontalLerpFactor)
-    
-    // Only lerp the Y position to filter out terrain bumps
-    const verticalLerpFactor = isGrounded ? 0.05 : 0.15 // Slightly reduced jump lerp to avoid jitter
+    const positionLerpFactor = 0.15
+    camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, positionLerpFactor)
+    camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, positionLerpFactor)
+
+    const verticalLerpFactor = isGrounded ? 0.05 : 0.15
     camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, verticalLerpFactor)
-    
-    // Smoothly interpolate the lookAt point as well
-    // Use the same horizontal lerp for lookAt to keep it in sync with camera position
-    const currentLookAt = new THREE.Vector3()
-    state.camera.getWorldDirection(currentLookAt)
-    // Instead of direct lookAt, let's lerp the target point
-    const targetLookAt = new THREE.Vector3(translation.x, lookAtY, translation.z)
-    
-    // We'll use a ref to store the smoothed lookAt target to avoid jitter
-    if (!state.camera.userData.smoothedLookAt) {
-        state.camera.userData.smoothedLookAt = new THREE.Vector3().copy(targetLookAt)
-    }
-    const smoothedLookAt = state.camera.userData.smoothedLookAt as THREE.Vector3
-    smoothedLookAt.lerp(targetLookAt, horizontalLerpFactor)
-    
-    camera.lookAt(smoothedLookAt)
+
+    // Make camera look at player using smoothed position
+    const lookAtTarget = new THREE.Vector3(
+      translation.x,
+      (isGrounded ? (smoothedY.current || translation.y) : translation.y) + 1.5,
+      translation.z
+    )
+    camera.lookAt(lookAtTarget)
   })
 
   return (
