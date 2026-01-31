@@ -4,7 +4,7 @@ import { useKeyboardControls, useGLTF, useAnimations } from "@react-three/drei"
 import { RapierRigidBody, RigidBody, CapsuleCollider } from "@react-three/rapier"
 import * as THREE from "three"
 
-const SPEED = 3
+const SPEED = 4
 const RUN_SPEED = 6
 
 const direction = new THREE.Vector3()
@@ -14,9 +14,13 @@ const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 5, 7)
 const smoothedHorizontalRotation = { current: 0 }
+const smoothedLookAtY = { current: 0 }
+const smoothedLookAtPosition = new THREE.Vector3() // Smooth lookAt target to prevent tilting
 
 export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
   const smoothedY = useRef(0)
+  const smoothedCameraY = useRef(0)
+  const stableGroundY = useRef(0) // Track stable ground height when grounded
   const rb = useRef<RapierRigidBody>(null)
   const groupRef = useRef<THREE.Group>(null)
   const characterModelRef = useRef<THREE.Group>(null)
@@ -81,23 +85,26 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     // Increased threshold slightly to better handle small physics bounces
     const isGrounded = Math.abs(rbVelocity.y) < 0.2
     
-    // Smooth Y movement for camera to prevent "head bobbing"
-    // We use a much slower lerp for Y when on ground, but faster when jumping/falling
-    // EVEN SLOWER lerp when grounded (0.01) to filter out terrain micro-variations
-    const yLerpFactor = isGrounded ? 0.01 : 0.15
-    // SMOOTHING OVERRIDE: If movement is minimal and grounded, lock Y
+    // Smooth Y movement for visual display
     const isMoving = Math.hypot(rbVelocity.x, rbVelocity.z) > 0.1
-    if (isGrounded && !isMoving) {
-        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current || translation.y, translation.y, 0.002)
-    } else {
-        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current || translation.y, translation.y, yLerpFactor)
+
+    // Initialize smoothedY on first frame
+    if (smoothedY.current === 0) {
+      smoothedY.current = translation.y
     }
 
-    // Update group position - use smoothed Y when grounded to avoid micro-bounces
-    // but keep X and Z reactive to physics
+    if (isGrounded) {
+        // When grounded, use medium smoothing for player visual position
+        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current, translation.y, 0.1)
+    } else {
+        // When airborne, track actual position more closely
+        smoothedY.current = THREE.MathUtils.lerp(smoothedY.current, translation.y, 0.2)
+    }
+
+    // Update group position with smoothed Y
     groupRef.current.position.set(
-      translation.x, 
-      isGrounded ? (smoothedY.current || translation.y) : translation.y, 
+      translation.x,
+      smoothedY.current,
       translation.z
     )
 
@@ -206,9 +213,28 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
       isJumpPressed.current = false
     }
 
-    // Camera follow - Fixed third person behind player
-    // Smooth the horizontal rotation to eliminate jitter during fast mouse movements
+    // BULLETPROOF FIX: Freeze camera Y completely when running
+    // Root cause: terrain physics causes translation.y to fluctuate
+    // Solution: Use frozen Y for camera position, override PointerLockControls rotation
 
+    if (isGrounded && isMoving) {
+      // Initialize and freeze stable Y
+      if (stableGroundY.current === 0) {
+        stableGroundY.current = translation.y
+      }
+      // COMPLETELY FROZEN - no updates while running
+    } else if (!isGrounded) {
+      // Airborne - sync to actual position
+      stableGroundY.current = translation.y
+    } else {
+      // Standing still - smoothly sync
+      stableGroundY.current = THREE.MathUtils.lerp(stableGroundY.current, translation.y, 0.2)
+    }
+
+    // Use frozen Y when running to eliminate jitter
+    const effectiveY = (isGrounded && isMoving) ? stableGroundY.current : translation.y
+
+    // Camera follow - Fixed third person behind player
     // Extract horizontal (yaw) rotation from PointerLockControls
     const cameraEuler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
     const targetHorizontalRotation = cameraEuler.y
@@ -220,13 +246,9 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
 
     // Smooth the rotation with proper angle wrapping
     let angleDiff = targetHorizontalRotation - smoothedHorizontalRotation.current
-    // Normalize angle difference to [-PI, PI] for shortest path
     while (angleDiff > Math.PI) angleDiff -= Math.PI * 2
     while (angleDiff < -Math.PI) angleDiff += Math.PI * 2
-
-    // Apply smoothing - higher value = more responsive, lower = smoother
-    const rotationSmoothFactor = 0.15
-    smoothedHorizontalRotation.current += angleDiff * rotationSmoothFactor
+    smoothedHorizontalRotation.current += angleDiff * 0.15
 
     // Apply smoothed yaw to camera offset
     const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(
@@ -235,25 +257,50 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     )
     cameraOffset.copy(idealOffset).applyQuaternion(yawQuaternion)
 
-    // Calculate and apply smoothed camera position
+    // Calculate target camera position using FROZEN Y
     const targetX = translation.x + cameraOffset.x
-    const targetY = (isGrounded ? (smoothedY.current || translation.y) : translation.y) + cameraOffset.y
     const targetZ = translation.z + cameraOffset.z
+    const targetY = effectiveY + 5 // Use frozen Y to eliminate jitter
 
+    // Apply camera position
     const positionLerpFactor = 0.15
     camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, positionLerpFactor)
     camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, positionLerpFactor)
 
-    const verticalLerpFactor = isGrounded ? 0.05 : 0.15
-    camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, verticalLerpFactor)
+    // BULLETPROOF: Directly set Y when running - no interpolation = no jitter
+    if (isGrounded && isMoving) {
+      camera.position.y = targetY
+    } else {
+      camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, positionLerpFactor)
+    }
 
-    // Make camera look at player using smoothed position
-    const lookAtTarget = new THREE.Vector3(
+    // LookAt target position with frozen Y to prevent vertical jitter
+    const lookAtTargetPosition = new THREE.Vector3(
       translation.x,
-      (isGrounded ? (smoothedY.current || translation.y) : translation.y) + 1.5,
+      effectiveY + 1.5, // Use frozen Y
       translation.z
     )
-    camera.lookAt(lookAtTarget)
+
+    // Initialize smoothed lookAt position on first frame
+    if (smoothedLookAtPosition.lengthSq() === 0 && gameState === 'playing') {
+      smoothedLookAtPosition.copy(lookAtTargetPosition)
+    }
+
+    // BULLETPROOF FIX: Always smooth lookAt to prevent tilting, but only Y is frozen
+    // Smooth X and Z to follow player, but freeze Y to prevent vertical jitter
+    if (isGrounded && isMoving) {
+      // Smooth X and Z to follow player without tilting
+      smoothedLookAtPosition.x = THREE.MathUtils.lerp(smoothedLookAtPosition.x, lookAtTargetPosition.x, 0.15)
+      smoothedLookAtPosition.z = THREE.MathUtils.lerp(smoothedLookAtPosition.z, lookAtTargetPosition.z, 0.15)
+      // Directly set Y - no smoothing = no vertical jitter
+      smoothedLookAtPosition.y = lookAtTargetPosition.y
+    } else {
+      // Smooth all components for jumps/landings
+      smoothedLookAtPosition.lerp(lookAtTargetPosition, 0.15)
+    }
+
+    // Make camera look at the smoothed target position
+    camera.lookAt(smoothedLookAtPosition)
   })
 
   return (
