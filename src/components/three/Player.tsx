@@ -21,14 +21,14 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
   useImperativeHandle(ref, () => groupRef.current!)
 
   useFrame((state, delta) => {
-    if (!rb.current || !groupRef.current) return
-
-    // If in preview mode, position the camera to look at the island from above
+    // Handle preview camera even if rb/groupRef are not ready or if it's not playing
     if (gameState === 'preview') {
       state.camera.position.lerp(new THREE.Vector3(0, 150, 150), 0.05)
       state.camera.lookAt(0, 0, 0)
       return
     }
+
+    if (!rb.current || !groupRef.current) return
 
     const { forward, backward, left, right, jump } = getKeys()
 
@@ -105,6 +105,7 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
       colliders={false}
       enabledRotations={[false, false, false]}
       position={[0, 1, 0]}
+      includeInPhysics={gameState !== 'preview'}
     >
       <group ref={groupRef} />
       <CapsuleCollider args={[0.5, 0.5]} />

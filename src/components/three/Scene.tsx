@@ -3,6 +3,7 @@ import { Canvas, useFrame } from "@react-three/fiber"
 import { KeyboardControls, Sky, Stars, ContactShadows, PointerLockControls, Environment } from "@react-three/drei"
 import { Physics, RigidBody } from "@react-three/rapier"
 import * as THREE from "three"
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { Player } from "./Player"
 
 // Simple pseudo-random generator based on seed
@@ -53,7 +54,7 @@ function fbm(x: number, y: number, seed: number) {
   return value;
 }
 
-function getIslandShape(x: number, z: number, seed: number, isVegetation = false) {
+function getIslandShape(x: number, z: number, seed: number, isVegetation = false, returnRawValue = false) {
   const maxR = GRASS_RANGE / 2;
   
   // Normalize coordinates
@@ -84,6 +85,8 @@ function getIslandShape(x: number, z: number, seed: number, isVegetation = false
   // Final shape calculation - stronger falloff at the edges
   const islandValue = (n * radialMask) - (Math.pow(d, 5.0) * 0.8) + centralBias;
   
+  if (returnRawValue) return islandValue;
+  
   const edgeThreshold = 0.12;
   const objectThreshold = 0.25;
   return islandValue > (isVegetation ? objectThreshold : edgeThreshold) ? 1 : 0;
@@ -97,14 +100,1003 @@ const keyboardMap = [
   { name: "jump", keys: ["Space"] },
 ]
 
-const NEAR_GRASS_COUNT = 60000
+const NEAR_GRASS_COUNT = 50000
 const MID_GRASS_COUNT = 60000
-const FAR_GRASS_COUNT = 50000
+const FAR_GRASS_COUNT = 60000
 const GRASS_RANGE = 200
 const ROCK_COUNT = 30
-const PALM_COUNT = 40
+const PALM_COUNT = 30
+const BUSH_COUNT = 40
+const FERN_COUNT = 50
+const BAMBOO_COUNT = 15
+const COCONUT_COUNT = 60
+const DRIFTWOOD_COUNT = 15
+const STARFISH_COUNT = 30
+const SHELL_COUNT = 40
+const CRAB_COUNT = 20
+const BUOY_COUNT = 8
+const TOTEM_COUNT = 5
+const TORCH_COUNT = 6
 
-function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: number, z: number, radius: number }[], leafGeometry: THREE.BufferGeometry }) {
+function Bushes({ seed, rockData, palmData }: { seed: number, rockData: { x: number, z: number, radius: number }[], palmData: { x: number, z: number, radius: number }[] }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const materialRef = useRef<THREE.ShaderMaterial>(null)
+
+  // Create a clustered bush geometry
+  const bushGeometry = useMemo(() => {
+    const geometries = []
+    const random = mulberry32(12345) // Fixed seed for geometry structure
+    
+    // Center main clump
+    const center = new THREE.IcosahedronGeometry(1, 1)
+    geometries.push(center)
+    
+    // Add 3-5 smaller clumps around
+    const clumpCount = 3 + Math.floor(random() * 3)
+    for (let i = 0; i < clumpCount; i++) {
+      const angle = (i / clumpCount) * Math.PI * 2 + random() * 0.5
+      const dist = 0.5 + random() * 0.3
+      const scale = 0.5 + random() * 0.4
+      
+      const clump = new THREE.IcosahedronGeometry(scale, 1)
+      clump.translate(
+        Math.cos(angle) * dist,
+        (random() - 0.5) * 0.3,
+        Math.sin(angle) * dist
+      )
+      geometries.push(clump)
+    }
+    
+    const merged = BufferGeometryUtils.mergeGeometries(geometries)
+    // Add some random vertex jitter for more organic look
+    const pos = merged.attributes.position
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i)
+      const y = pos.getY(i)
+      const z = pos.getZ(i)
+      
+      // Use vertex position as seed for deterministic jitter
+      const jitter = 0.05
+      pos.setXYZ(i, 
+        x + (Math.sin(x * 10.0 + y * 5.0) * jitter),
+        y + (Math.cos(y * 10.0 + z * 5.0) * jitter),
+        z + (Math.sin(z * 10.0 + x * 5.0) * jitter)
+      )
+    }
+    merged.computeVertexNormals()
+    return merged
+  }, [])
+
+  const bushes = useMemo(() => {
+    const random = mulberry32(seed * 44444);
+    const data: { x: number, z: number, scale: number, rotationY: number }[] = []
+    let i = 0
+    let attempts = 0
+    while (i < BUSH_COUNT && attempts < 2000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.2)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+
+      if (getIslandShape(x, z, seed, true) === 0) continue;
+
+      const scale = 0.8 + random() * 1.2
+      const radius = scale * 1.2;
+
+      let tooClose = false;
+      for (const rock of rockData) {
+        if (Math.hypot(x - rock.x, z - rock.z) < rock.radius + radius) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      for (const palm of palmData) {
+        if (Math.hypot(x - palm.x, z - palm.z) < palm.radius + radius) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      for (const bush of data) {
+        if (Math.hypot(x - bush.x, z - bush.z) < radius * 2) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      const rotationY = random() * Math.PI * 2
+      
+      data.push({ x, z, scale, rotationY })
+      i++
+    }
+    return data
+  }, [seed, rockData, palmData])
+
+  const shader = useMemo(() => ({
+    uniforms: {
+      uTime: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vInstanceColor;
+      varying float vY;
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      uniform float uTime;
+      
+      void main() {
+        vUv = uv;
+        vInstanceColor = instanceColor;
+        vY = position.y;
+        vNormal = normalize(normalMatrix * (instanceMatrix * vec4(normal, 0.0)).xyz);
+        
+        vec3 pos = position;
+        
+        // Dynamic sway - stronger at the top
+        vec4 instancePosition = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float swayTime = uTime * 1.5 + instancePosition.x * 0.1 + instancePosition.z * 0.1;
+        float heightFactor = max(0.0, pos.y + 0.8);
+        float sway = sin(swayTime) * 0.12 * heightFactor;
+        pos.x += sway;
+        pos.z += sin(swayTime * 0.7) * 0.08 * heightFactor;
+        
+        vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(pos, 1.0);
+        vViewPosition = -mvPosition.xyz;
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      varying vec2 vUv;
+      varying vec3 vInstanceColor;
+      varying float vY;
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      
+      void main() {
+        // Simple alpha discard for toon leaf shape based on UV
+        float leafShape = sin(vUv.x * 30.0) * sin(vUv.y * 30.0);
+        if (leafShape < -0.5) discard;
+
+        // Main color with vertical gradient
+        vec3 baseColor = mix(vInstanceColor * 0.5, vInstanceColor * 1.1, vY + 0.6);
+        
+        // Procedural leafy pattern (stepping for toon look)
+        float noise = sin(vUv.x * 30.0 + vY * 10.0) * sin(vUv.y * 30.0);
+        float leafStep = smoothstep(-0.2, 0.2, noise);
+
+        vec3 color = mix(baseColor * 0.9, baseColor, leafStep);
+        
+        // Simple toon shading / rim light
+        vec3 normal = normalize(vNormal);
+        vec3 viewDir = normalize(vViewPosition);
+        float rim = 1.0 - max(0.0, dot(normal, viewDir));
+        rim = pow(rim, 3.0);
+        color += rim * 0.3 * vInstanceColor;
+
+        // Subtle top highlight
+        float topHighlight = smoothstep(0.3, 1.0, vY);
+        color = mix(color, color * 1.2, topHighlight * 0.2);
+        
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `,
+  }), [])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    const random = mulberry32(seed * 33333);
+    bushes.forEach((bush, i) => {
+      dummy.position.set(bush.x, bush.scale * 0.5, bush.z)
+      dummy.rotation.set(0, bush.rotationY, 0)
+      dummy.scale.set(bush.scale, bush.scale, bush.scale)
+      
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+      
+      // Slightly more varied tropical greens
+      const bushColor = new THREE.Color().setHSL(0.2 + random() * 0.12, 0.6, 0.25 + random() * 0.2);
+      mesh.setColorAt(i, bushColor)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  }
+
+  useFrame((state) => {
+    if (materialRef.current) {
+      materialRef.current.uniforms.uTime.value = state.clock.elapsedTime
+    }
+  })
+
+  return (
+    <instancedMesh ref={setInstances} args={[bushGeometry, undefined, bushes.length]} castShadow receiveShadow>
+      <shaderMaterial 
+        ref={materialRef} 
+        args={[shader]} 
+        vertexColors 
+        alphaTest={0.5}
+        transparent={false}
+        depthWrite={true}
+        depthTest={true}
+      />
+    </instancedMesh>
+  )
+}
+
+function Coconuts({ seed, palmData }: { seed: number, palmData: { x: number, z: number, height: number }[] }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ color: "#4e342e", roughness: 0.8 }), [])
+  const geometry = useMemo(() => new THREE.SphereGeometry(0.25, 8, 8), [])
+
+  const coconuts = useMemo(() => {
+    if (palmData.length === 0) return []
+    const random = mulberry32(seed * 777)
+    const data = []
+    
+    palmData.forEach(palm => {
+      const count = 1 + Math.floor(random() * 3)
+      for (let i = 0; i < count; i++) {
+        const angle = random() * Math.PI * 2
+        const dist = 0.5 + random() * 1.5
+        data.push({
+          x: palm.x + Math.cos(angle) * dist,
+          z: palm.z + Math.sin(angle) * dist,
+          scale: 0.8 + random() * 0.4
+        })
+      }
+    })
+    return data
+  }, [seed, palmData])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    coconuts.forEach((coco, i) => {
+      dummy.position.set(coco.x, -0.3, coco.z)
+      dummy.scale.set(coco.scale, coco.scale, coco.scale)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  if (coconuts.length === 0) return null
+
+  return (
+    <instancedMesh ref={setInstances} args={[geometry, material, coconuts.length]} castShadow receiveShadow />
+  )
+}
+
+function Ferns({ seed, rockData, palmData }: { seed: number, rockData: { x: number, z: number, radius: number }[], palmData: { x: number, z: number, radius: number }[] }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const fernGeometry = useMemo(() => {
+    const geometries = []
+    const leafCount = 8
+    for (let i = 0; i < leafCount; i++) {
+      const geo = new THREE.PlaneGeometry(0.5, 1.5, 1, 4)
+      geo.translate(0, 0.75, 0)
+      const angle = (i / leafCount) * Math.PI * 2
+      geo.rotateX(Math.PI * 0.3)
+      geo.rotateY(angle)
+      geometries.push(geo)
+    }
+    const merged = BufferGeometryUtils.mergeGeometries(geometries)
+    merged.computeVertexNormals()
+    return merged
+  }, [])
+
+  const ferns = useMemo(() => {
+    const random = mulberry32(seed * 888)
+    const data: { x: number, z: number, rotationY: number, scale: number }[] = []
+    let i = 0
+    let attempts = 0
+    while (i < FERN_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.2)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      if (getIslandShape(x, z, seed, true) === 0) continue
+
+      const scale = 0.6 + random() * 0.6
+      const radius = scale * 1.5
+
+      let tooClose = false
+      for (const rock of rockData) {
+        if (Math.hypot(x - rock.x, z - rock.z) < rock.radius + radius) {
+          tooClose = true
+          break
+        }
+      }
+      if (tooClose) continue
+
+      for (const palm of palmData) {
+        if (Math.hypot(x - palm.x, z - palm.z) < palm.radius + radius) {
+          tooClose = true
+          break
+        }
+      }
+      if (tooClose) continue
+
+      for (const fern of data) {
+        if (Math.hypot(x - fern.x, z - fern.z) < radius * 2) {
+          tooClose = true
+          break
+        }
+      }
+      if (tooClose) continue
+
+      data.push({ x, z, rotationY: random() * Math.PI * 2, scale })
+      i++
+    }
+    return data
+  }, [seed, rockData, palmData])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    ferns.forEach((fern, i) => {
+      dummy.position.set(fern.x, -0.45, fern.z)
+      dummy.rotation.set(0, fern.rotationY, 0)
+      dummy.scale.set(fern.scale, fern.scale, fern.scale)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <instancedMesh ref={setInstances} args={[fernGeometry, undefined, ferns.length]} castShadow>
+      <meshStandardMaterial 
+        color="#2d5a27" 
+        side={THREE.DoubleSide} 
+        roughness={0.8} 
+        alphaTest={0.5} 
+        transparent={false}
+        depthWrite={true}
+        depthTest={true}
+      />
+    </instancedMesh>
+  )
+}
+
+function Bamboo({ seed, rockData, palmData }: { seed: number, rockData: { x: number, z: number, radius: number }[], palmData: { x: number, z: number, radius: number }[] }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const bambooGeometry = useMemo(() => {
+    const geo = new THREE.CylinderGeometry(0.1, 0.1, 5, 6, 5)
+    geo.translate(0, 2.5, 0)
+    return geo
+  }, [])
+
+  const thickets = useMemo(() => {
+    const random = mulberry32(seed * 999)
+    const data: { x: number, z: number, height: number, rotationY: number, lean: number }[] = []
+    let i = 0
+    let attempts = 0
+    while (i < BAMBOO_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.5)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      if (getIslandShape(x, z, seed, true) === 0) continue
+
+      let tooClose = false
+      for (const rock of rockData) {
+        if (Math.hypot(x - rock.x, z - rock.z) < rock.radius + 2) {
+          tooClose = true
+          break
+        }
+      }
+      if (tooClose) continue
+
+      for (const palm of palmData) {
+        if (Math.hypot(x - palm.x, z - palm.z) < palm.radius + 2) {
+          tooClose = true
+          break
+        }
+      }
+      if (tooClose) continue
+
+      const clusterSize = 5 + Math.floor(random() * 8)
+      for (let j = 0; j < clusterSize; j++) {
+        const ox = (random() - 0.5) * 2
+        const oz = (random() - 0.5) * 2
+        data.push({
+          x: x + ox,
+          z: z + oz,
+          height: 0.8 + random() * 0.4,
+          rotationY: random() * Math.PI,
+          lean: (random() - 0.5) * 0.1
+        })
+      }
+      i++
+    }
+    return data
+  }, [seed, rockData, palmData])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    thickets.forEach((b, i) => {
+      dummy.position.set(b.x, -0.5, b.z)
+      dummy.rotation.set(b.lean, b.rotationY, 0)
+      dummy.scale.set(1, b.height, 1)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <instancedMesh ref={setInstances} args={[bambooGeometry, undefined, thickets.length]} castShadow>
+      <meshStandardMaterial color="#4f7942" roughness={0.6} />
+    </instancedMesh>
+  )
+}
+
+function SandMounds({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const geometry = useMemo(() => new THREE.SphereGeometry(2, 16, 8), [])
+  
+  const mounds = useMemo(() => {
+    const random = mulberry32(seed * 111)
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < 30 && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.1)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      // Only place on sand (low island value)
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.15 || islandVal < 0.05) continue
+
+      data.push({ x, z, scaleX: 1 + random() * 2, scaleY: 0.2 + random() * 0.3, scaleZ: 1 + random() * 2 })
+      i++
+    }
+    return data
+  }, [seed])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    mounds.forEach((m, i) => {
+      dummy.position.set(m.x, -0.6, m.z)
+      dummy.scale.set(m.scaleX, m.scaleY, m.scaleZ)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <instancedMesh ref={setInstances} args={[geometry, undefined, mounds.length]} receiveShadow>
+      <meshStandardMaterial color="#d2b48c" roughness={1} />
+    </instancedMesh>
+  )
+}
+
+function Driftwood({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const geometry = useMemo(() => {
+    const geo = new THREE.CylinderGeometry(0.2, 0.2, 2, 6, 4)
+    const pos = geo.attributes.position
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i)
+      pos.setX(i, pos.getX(i) + Math.sin(y * 2) * 0.3)
+    }
+    geo.rotateZ(Math.PI / 2)
+    return geo
+  }, [])
+  
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ color: "#a89080", roughness: 0.9 }), [])
+
+  const wood = useMemo(() => {
+    const random = mulberry32(seed * 222)
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < DRIFTWOOD_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.1)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.12 || islandVal < 0.05) continue
+
+      data.push({ x, z, rotationY: random() * Math.PI * 2, scale: 0.8 + random() * 0.5 })
+      i++
+    }
+    return data
+  }, [seed])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    wood.forEach((w, i) => {
+      dummy.position.set(w.x, -0.45, w.z)
+      dummy.rotation.set(0, w.rotationY, 0)
+      dummy.scale.set(w.scale, w.scale, w.scale)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <instancedMesh ref={setInstances} args={[geometry, material, wood.length]} castShadow receiveShadow />
+  )
+}
+
+function BeachDecor({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const starfishGeo = useMemo(() => new THREE.SphereGeometry(0.15, 5, 2), [])
+  const shellGeo = useMemo(() => new THREE.IcosahedronGeometry(0.1, 0), [])
+  
+  const decor = useMemo(() => {
+    const random = mulberry32(seed * 333)
+    const starfish = []
+    const shells = []
+    
+    let i = 0
+    let attempts = 0
+    while (i < STARFISH_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.1)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.1 || islandVal < 0.02) continue
+      starfish.push({ x, z, color: ["#ff6347", "#ffa500", "#ff69b4"][Math.floor(random() * 3)], rot: random() * Math.PI })
+      i++
+    }
+    
+    i = 0
+    attempts = 0
+    while (i < SHELL_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.1)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.12 || islandVal < 0.02) continue
+      shells.push({ x, z, rotX: random() * Math.PI, rotY: random() * Math.PI })
+      i++
+    }
+    return { starfish, shells }
+  }, [seed])
+
+  const setStarfish = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    decor.starfish.forEach((s, i) => {
+      dummy.position.set(s.x, -0.55, s.z)
+      dummy.rotation.set(0, s.rot, 0)
+      dummy.scale.set(1, 0.2, 1)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+      mesh.setColorAt(i, new THREE.Color(s.color))
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  }
+
+  const setShells = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    decor.shells.forEach((s, i) => {
+      dummy.position.set(s.x, -0.58, s.z)
+      dummy.rotation.set(s.rotX, s.rotY, 0)
+      dummy.scale.set(1, 0.6, 1.2)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <group>
+      <instancedMesh ref={setStarfish} args={[starfishGeo, undefined, decor.starfish.length]}>
+        <meshStandardMaterial roughness={0.5} vertexColors />
+      </instancedMesh>
+      <instancedMesh ref={setShells} args={[shellGeo, undefined, decor.shells.length]}>
+        <meshStandardMaterial color="#fff5ee" roughness={0.4} />
+      </instancedMesh>
+    </group>
+  )
+}
+
+function Seaweed({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const geometry = useMemo(() => {
+    const geo = new THREE.PlaneGeometry(0.2, 1.5, 1, 4)
+    geo.translate(0, 0.75, 0)
+    return geo
+  }, [])
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ 
+    color: "#2e8b57", 
+    side: THREE.DoubleSide, 
+    transparent: false, 
+    alphaTest: 0.5,
+    depthWrite: true,
+    depthTest: true
+  }), [])
+
+  const plants = useMemo(() => {
+    const random = mulberry32(seed * 444)
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < 100 && attempts < 2000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 1.8)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.05) continue // Only in water
+
+      data.push({ x, z, rot: random() * Math.PI * 2, scale: 0.5 + random() * 1 })
+      i++
+    }
+    return data
+  }, [seed])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    plants.forEach((p, i) => {
+      dummy.position.set(p.x, -1.2, p.z)
+      dummy.rotation.set(0, p.rot, 0)
+      dummy.scale.set(1, p.scale, 1)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return (
+    <instancedMesh ref={setInstances} args={[geometry, material, plants.length]} />
+  )
+}
+
+function WaterObjects({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const buoyGeo = useMemo(() => {
+    const geometries = []
+    const top = new THREE.ConeGeometry(0.3, 0.6, 8)
+    top.translate(0, 0.3, 0)
+    geometries.push(top)
+    const bottom = new THREE.SphereGeometry(0.3, 8, 4)
+    bottom.translate(0, -0.1, 0)
+    geometries.push(bottom)
+    return BufferGeometryUtils.mergeGeometries(geometries)
+  }, [])
+  
+  const crateGeo = useMemo(() => new THREE.BoxGeometry(0.8, 0.8, 0.8), [])
+
+  const objects = useMemo(() => {
+    const random = mulberry32(seed * 555)
+    const buoys = []
+    const crates = []
+    
+    for (let i = 0; i < BUOY_COUNT; i++) {
+      const angle = random() * Math.PI * 2
+      const dist = 50 + random() * 50
+      buoys.push({ x: Math.cos(angle) * dist, z: Math.sin(angle) * dist, phase: random() * Math.PI * 2 })
+    }
+    
+    for (let i = 0; i < 15; i++) {
+      const angle = random() * Math.PI * 2
+      const dist = 40 + random() * 20
+      crates.push({ x: Math.cos(angle) * dist, z: Math.sin(angle) * dist, phase: random() * Math.PI * 2, rot: random() * Math.PI })
+    }
+    return { buoys, crates }
+  }, [seed])
+
+  const buoyRef = useRef<THREE.InstancedMesh>(null)
+  const crateRef = useRef<THREE.InstancedMesh>(null)
+
+  useFrame((state) => {
+    const time = state.clock.elapsedTime
+    if (buoyRef.current) {
+      objects.buoys.forEach((b, i) => {
+        dummy.position.set(b.x, -0.7 + Math.sin(time + b.phase) * 0.1, b.z)
+        dummy.rotation.set(Math.sin(time + b.phase) * 0.2, 0, Math.cos(time + b.phase) * 0.2)
+        dummy.updateMatrix()
+        buoyRef.current!.setMatrixAt(i, dummy.matrix)
+      })
+      buoyRef.current.instanceMatrix.needsUpdate = true
+    }
+    if (crateRef.current) {
+      objects.crates.forEach((c, i) => {
+        dummy.position.set(c.x, -0.8 + Math.sin(time * 0.8 + c.phase) * 0.05, c.z)
+        dummy.rotation.set(Math.sin(time * 0.5 + c.phase) * 0.1, c.rot + time * 0.1, 0)
+        dummy.updateMatrix()
+        crateRef.current!.setMatrixAt(i, dummy.matrix)
+      })
+      crateRef.current.instanceMatrix.needsUpdate = true
+    }
+  })
+
+  return (
+    <group>
+      <instancedMesh ref={buoyRef} args={[buoyGeo, undefined, objects.buoys.length]} castShadow>
+        <meshStandardMaterial color="#ff4500" roughness={0.3} />
+      </instancedMesh>
+      <instancedMesh ref={crateRef} args={[crateGeo, undefined, objects.crates.length]} castShadow>
+        <meshStandardMaterial color="#8b4513" roughness={0.8} />
+      </instancedMesh>
+    </group>
+  )
+}
+
+function Crabs({ seed }: { seed: number }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const geometry = useMemo(() => {
+    const geo = new THREE.BoxGeometry(0.3, 0.1, 0.2)
+    return geo
+  }, [])
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ color: "#ff4500", roughness: 0.5 }), [])
+
+  const crabs = useMemo(() => {
+    const random = mulberry32(seed * 666)
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < CRAB_COUNT && attempts < 1000) {
+      attempts++
+      const r = Math.sqrt(random()) * (GRASS_RANGE / 2.1)
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      const islandVal = getIslandShape(x, z, seed, false, true) as number
+      if (islandVal > 0.08 || islandVal < 0.02) continue
+      data.push({ x, z, rot: random() * Math.PI * 2, phase: random() * Math.PI * 2 })
+      i++
+    }
+    return data
+  }, [seed])
+
+  const meshRef = useRef<THREE.InstancedMesh>(null)
+
+  useFrame((state) => {
+    const time = state.clock.elapsedTime
+    if (meshRef.current) {
+      crabs.forEach((c, i) => {
+        const move = Math.sin(time * 2 + c.phase) * 0.2
+        dummy.position.set(c.x + Math.cos(c.rot) * move, -0.6, c.z + Math.sin(c.rot) * move)
+        dummy.rotation.set(0, c.rot, 0)
+        dummy.updateMatrix()
+        meshRef.current!.setMatrixAt(i, dummy.matrix)
+      })
+      meshRef.current.instanceMatrix.needsUpdate = true
+    }
+  })
+
+  return <instancedMesh ref={meshRef} args={[geometry, material, crabs.length]} castShadow />
+}
+
+function AncientTotems({ seed, rockData }: { seed: number, rockData: { x: number, z: number, radius: number }[] }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const geometry = useMemo(() => {
+    const geometries = []
+    const base = new THREE.BoxGeometry(1, 2, 0.8)
+    base.translate(0, 1, 0)
+    geometries.push(base)
+    const nose = new THREE.BoxGeometry(0.2, 0.5, 0.2)
+    nose.translate(0, 1.2, 0.5)
+    geometries.push(nose)
+    return BufferGeometryUtils.mergeGeometries(geometries)
+  }, [])
+  const material = useMemo(() => new THREE.MeshStandardMaterial({ color: "#696969", roughness: 0.9 }), [])
+
+  const totems = useMemo(() => {
+    const random = mulberry32(seed * 7777)
+    const data = []
+    let i = 0
+    let attempts = 0
+    while (i < TOTEM_COUNT && attempts < 1000) {
+      attempts++
+      const r = 10 + random() * 30
+      const theta = random() * 2 * Math.PI
+      const x = r * Math.cos(theta)
+      const z = r * Math.sin(theta)
+      if (getIslandShape(x, z, seed, true) === 0) continue
+      data.push({ x, z, rot: random() * Math.PI * 2 })
+      i++
+    }
+    return data
+  }, [seed])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    totems.forEach((t, i) => {
+      dummy.position.set(t.x, -0.5, t.z)
+      dummy.rotation.set(0, t.rot, 0)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
+
+  return <instancedMesh ref={setInstances} args={[geometry, material, totems.length]} castShadow />
+}
+
+function Structures({ seed }: { seed: number }) {
+  const random = useMemo(() => mulberry32(seed * 8888), [seed])
+  const pos = useMemo(() => {
+    let attempts = 0
+    while (attempts < 100) {
+      const x = (random() - 0.5) * 20
+      const z = (random() - 0.5) * 20
+      if (getIslandShape(x, z, seed, true) === 1) return { x, z }
+      attempts++
+    }
+    return { x: 5, z: 5 }
+  }, [seed, random])
+
+  const fireRef = useRef<THREE.PointLight>(null)
+  useFrame((state) => {
+    if (fireRef.current) {
+      fireRef.current.intensity = 1.5 + Math.sin(state.clock.elapsedTime * 10) * 0.5
+    }
+  })
+
+  return (
+    <group position={[pos.x, -0.5, pos.z]}>
+      {/* Campfire */}
+      <group>
+        {[0, 1, 2, 3, 4].map(i => (
+          <mesh key={i} position={[Math.cos(i * 1.2) * 0.5, 0.1, Math.sin(i * 1.2) * 0.5]} rotation={[0, i, 0]}>
+            <boxGeometry args={[0.2, 0.1, 0.6]} />
+            <meshStandardMaterial color="#4e342e" />
+          </mesh>
+        ))}
+        <mesh position={[0, 0.3, 0]}>
+          <coneGeometry args={[0.3, 0.6, 6]} />
+          <meshStandardMaterial color="#ff4500" emissive="#ff4500" emissiveIntensity={2} transparent opacity={0.8} />
+        </mesh>
+        <pointLight ref={fireRef} color="#ff8c00" distance={10} decay={2} castShadow />
+      </group>
+      
+      {/* Small Tent/Lean-to */}
+      <mesh position={[2, 0.5, 0]} rotation={[0, -Math.PI / 4, 0]}>
+        <coneGeometry args={[1.5, 2, 4]} />
+        <meshStandardMaterial color="#a0522d" />
+      </mesh>
+    </group>
+  )
+}
+
+function Torches({ seed }: { seed: number }) {
+  const torches = useMemo(() => {
+    const random = mulberry32(seed * 9999)
+    const data = []
+    for (let i = 0; i < TORCH_COUNT; i++) {
+      const angle = (i / TORCH_COUNT) * Math.PI * 2
+      const x = Math.cos(angle) * 15 + (random() - 0.5) * 5
+      const z = Math.sin(angle) * 15 + (random() - 0.5) * 5
+      data.push({ x, z })
+    }
+    return data
+  }, [seed])
+
+  return (
+    <group>
+      {torches.map((t, i) => (
+        <group key={i} position={[t.x, -0.5, t.z]}>
+          <mesh position={[0, 1, 0]}>
+            <cylinderGeometry args={[0.05, 0.05, 2]} />
+            <meshStandardMaterial color="#4e342e" />
+          </mesh>
+          <mesh position={[0, 2.1, 0]}>
+            <sphereGeometry args={[0.1, 8, 8]} />
+            <meshStandardMaterial color="#ff4500" emissive="#ff4500" emissiveIntensity={2} />
+          </mesh>
+          <pointLight color="#ff8c00" intensity={0.5} distance={5} position={[0, 2.1, 0]} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function AtmosphericEffects({ seed, gameState }: { seed: number, gameState: 'preview' | 'playing' }) {
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const leafGeo = useMemo(() => new THREE.PlaneGeometry(0.1, 0.1), [])
+  const leafMat = useMemo(() => new THREE.MeshStandardMaterial({ 
+    color: "#2d5a27", 
+    side: THREE.DoubleSide, 
+    alphaTest: 0.5,
+    transparent: false,
+    depthWrite: true,
+    depthTest: true
+  }), [])
+  
+  const particleCount = gameState === 'preview' ? 100 : 200
+  const particles = useMemo(() => {
+    const random = mulberry32(seed * 123)
+    const data = []
+    for (let i = 0; i < particleCount; i++) {
+      data.push({
+        x: (random() - 0.5) * 60,
+        y: 5 + random() * 10,
+        z: (random() - 0.5) * 60,
+        speed: 0.5 + random() * 1,
+        rotSpeed: random() * 2,
+        phase: random() * Math.PI * 2
+      })
+    }
+    return data
+  }, [seed, particleCount])
+
+  const leafRef = useRef<THREE.InstancedMesh>(null)
+  const fireflyRef = useRef<THREE.Points>(null)
+
+  const fireflies = useMemo(() => {
+    const count = gameState === 'preview' ? 50 : 100
+    const positions = new Float32Array(count * 3)
+    const random = mulberry32(seed * 456)
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = (random() - 0.5) * 40
+      positions[i * 3 + 1] = random() * 3
+      positions[i * 3 + 2] = (random() - 0.5) * 40
+    }
+    return positions
+  }, [seed])
+
+  useFrame((state) => {
+    const time = state.clock.elapsedTime
+    if (leafRef.current) {
+      particles.forEach((p, i) => {
+        let y = p.y - (time * p.speed) % 15
+        if (y < -0.5) y += 15
+        const x = p.x + Math.sin(time + p.phase) * 2
+        const z = p.z + Math.cos(time * 0.5 + p.phase) * 2
+        dummy.position.set(x, y, z)
+        dummy.rotation.set(time * p.rotSpeed, time * p.rotSpeed * 0.5, 0)
+        dummy.updateMatrix()
+        leafRef.current!.setMatrixAt(i, dummy.matrix)
+      })
+      leafRef.current.instanceMatrix.needsUpdate = true
+    }
+    
+    if (fireflyRef.current) {
+      const pos = fireflyRef.current.geometry.attributes.position.array as Float32Array
+      const count = gameState === 'preview' ? 50 : 100
+      for (let i = 0; i < count; i++) {
+        pos[i * 3 + 1] += Math.sin(time + i) * 0.005
+      }
+      fireflyRef.current.geometry.attributes.position.needsUpdate = true
+    }
+  })
+
+  return (
+    <group>
+      <instancedMesh ref={leafRef} args={[leafGeo, leafMat, particleCount]} />
+      <points ref={fireflyRef}>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            count={fireflies.length / 3}
+            array={fireflies}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <pointsMaterial size={0.15} color="#ffff00" transparent opacity={0.6} />
+      </points>
+    </group>
+  )
+}
+
+function Palms({ seed, rockData, leafGeometry, onPalmData, gameState }: { seed: number, rockData: { x: number, z: number, radius: number }[], leafGeometry: THREE.BufferGeometry, onPalmData: (data: { x: number, z: number, height: number, radius: number }[]) => void, gameState: 'preview' | 'playing' }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const trunkMaterialRef = useRef<THREE.ShaderMaterial>(null)
   const leafMaterialRef = useRef<THREE.ShaderMaterial>(null)
@@ -127,7 +1119,7 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
       for (const rock of rockData) {
         const dx = x - rock.x;
         const dz = z - rock.z;
-        if (dx*dx + dz*dz < (rock.radius + 3) * (rock.radius + 3)) {
+        if (dx*dx + dz*dz < (rock.radius + 2) * (rock.radius + 2)) {
           tooClose = true;
           break;
         }
@@ -137,7 +1129,7 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
       for (const palm of data) {
         const dx = x - palm.x;
         const dz = z - palm.z;
-        if (dx*dx + dz*dz < 64) { // 8 units apart
+        if (dx*dx + dz*dz < 49) { // 7 units apart
           tooClose = true;
           break;
         }
@@ -149,12 +1141,15 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
       const leafCount = 12 + Math.floor(random() * 4)
       const trunkLean = (random() - 0.5) * 0.15
       const trunkLeanDir = random() * Math.PI * 2
+      const radius = 2.5; // Radius for other objects to avoid
       
-      data.push({ x, z, height, rotationY, trunkLean, trunkLeanDir, leafCount })
+      data.push({ x, z, height, rotationY, trunkLean, trunkLeanDir, leafCount, radius })
       i++
     }
+    // Report palm positions for coconuts and others
+    onPalmData(data.map(p => ({ x: p.x, z: p.z, height: p.height, radius: p.radius })))
     return data
-  }, [seed, rockData])
+  }, [seed, rockData, onPalmData])
 
   const trunkShader = useMemo(() => ({
     uniforms: {
@@ -170,8 +1165,8 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
         vec3 pos = position;
         
         // Bend the trunk
-        // We use (pos.y + 0.5) / 1.0 as the height factor since cylinder is height 1 centered at 0
-        float h = pos.y + 0.5;
+        // We use pos.y as the height factor since cylinder is height 1 translated to start at 0
+        float h = pos.y;
         float bend = pow(h, 2.0) * 1.2;
         pos.x += bend;
         
@@ -218,12 +1213,13 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
         vec3 pos = position;
         
         // Taper the leaf geometry toward the tip
-        float taper = 1.0 - uv.y * 0.8;
+        // Now geo is translated by (0, 0.5, 0), so pos.y goes from 0 to 1
+        float distAlong = pos.y; 
+        float taper = 1.0 - distAlong * 0.8;
         pos.x *= taper;
         
         // Bend the leaf downward (quadratic)
-        // We use uv.y as the distance along the leaf
-        float bend = pow(uv.y, 1.5) * 5.0; 
+        float bend = pow(distAlong, 1.5) * 5.0; 
         pos.z += bend;
         
         // Dynamic sway
@@ -232,8 +1228,8 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
         float sway = sin(swayTime) * 0.15;
         float rustle = sin(uTime * 5.0 + instancePosition.y) * 0.02;
         
-        pos.x += (sway + rustle) * uv.y;
-        pos.z += (sway * 0.5) * uv.y;
+        pos.x += (sway + rustle) * distAlong;
+        pos.z += (sway * 0.5) * distAlong;
         
         gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(pos, 1.0);
       }
@@ -242,13 +1238,18 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
       varying vec2 vUv;
       varying vec3 vInstanceColor;
       void main() {
+        // Simple leaf shape discard
+        float centerDist = abs(vUv.x - 0.5) * 2.0; // Normalized 0 to 1 from center
+        float leafShape = smoothstep(1.0, 0.9, centerDist);
+        if (vUv.y > 0.95 || leafShape < 0.1) discard;
+
         // Vertical gradient
         vec3 baseColor = vInstanceColor * 0.7;
         vec3 tipColor = vInstanceColor * 1.3;
         vec3 color = mix(baseColor, tipColor, vUv.y);
         
         // Mid-rib detail
-        float midRib = 1.0 - smoothstep(0.0, 0.05, abs(vUv.x));
+        float midRib = 1.0 - smoothstep(0.0, 0.1, abs(vUv.x - 0.5));
         color *= (1.0 + midRib * 0.2);
 
         // Subtle fringe detail
@@ -256,7 +1257,7 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
         color += fringe;
 
         // Fake depth shading
-        color *= (0.8 + 0.4 * abs(vUv.x * 2.0));
+        color *= (0.8 + 0.4 * centerDist);
 
         gl_FragColor = vec4(color, 1.0);
       }
@@ -266,7 +1267,7 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
   const setTrunkInstances = (mesh: THREE.InstancedMesh | null) => {
     if (!mesh) return
     palms.forEach((palm, i) => {
-      dummy.position.set(palm.x, palm.height / 2, palm.z)
+      dummy.position.set(palm.x, -0.5, palm.z)
       dummy.rotation.set(palm.trunkLean, palm.trunkLeanDir, 0)
       dummy.scale.set(0.6, palm.height, 0.6) // Thicker: 0.6 instead of 0.4-0.2
       
@@ -281,28 +1282,20 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
     const random = mulberry32(seed * 77777);
     let totalIdx = 0
     palms.forEach((palm) => {
-      const palmTopOffset = palm.height;
-      // In shader: pos.x += pow(h, 2.0) * 1.2; where h goes from 0 to 1
-      // At top, h = 1.0, so bend is 1.2. 
-      // This x-offset is in the LOCAL space of the trunk after trunkLean rotation.
-      const localBendX = 1.2 * 0.6; // 1.2 units of bend * scale.x (which is 0.6)
+      // In trunk shader: 
+      // h = pos.y (0 to 1)
+      // bend = pow(h, 2.0) * 1.2
+      // pos.x += bend
+      // Cylinder is scaled by (0.6, palm.height, 0.6)
+      // So at h=1, local position is (1.2, 1.0, 0)
       
-      // We need to find the top of the trunk in world space.
-      // The trunk is height `palm.height`, centered at `palm.height / 2` (locally).
-      // Local top is (0, palm.height / 2, 0) but we need to account for shader bend.
-      // Shader bend is applied to `pos` before `instanceMatrix` in my shader? 
-      // Wait, let's look at shader: 
-      // gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(pos, 1.0);
-      // Yes, bend is in local space of the cylinder (height 1, centered at 0).
-      // So at h=1 (top), pos.x += 1.2.
-      // After scale(0.6, height, 0.6), top is at (1.2 * 0.6, height/2, 0) in "instanced local" space.
-      // Then instanceMatrix moves it to palm position and rotates it.
+      const localTop = new THREE.Vector3(1.2, 1.0, 0);
+      const worldTop = new THREE.Vector3();
       
-      const localTop = new THREE.Vector3(1.2 * 0.6, 0.5, 0);
-      const worldTop = localTop.clone()
-        .multiply(new THREE.Vector3(1, palm.height, 1))
+      worldTop.copy(localTop)
+        .multiply(new THREE.Vector3(0.6, palm.height, 0.6))
         .applyEuler(new THREE.Euler(palm.trunkLean, palm.trunkLeanDir, 0))
-        .add(new THREE.Vector3(palm.x, palm.height / 2, palm.z));
+        .add(new THREE.Vector3(palm.x, -0.5, palm.z));
 
       for (let j = 0; j < palm.leafCount; j++) {
         const angle = (j * Math.PI * 2) / palm.leafCount + palm.rotationY;
@@ -312,7 +1305,8 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
         dummy.position.copy(worldTop)
         // Rotate leaf to point outwards and tilt down significantly
         const downwardTilt = 0.6 + random() * 0.4;
-        dummy.rotation.set(downwardTilt, angle, 0, 'YXZ')
+        dummy.rotation.set(0, angle, 0, 'YXZ') // Rotate around Y first
+        dummy.rotateX(downwardTilt) // Then tilt down locally
         dummy.scale.set(leafWidth, leafLen, 1)
         
         dummy.updateMatrix()
@@ -339,23 +1333,29 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
 
   const totalLeafSegments = useMemo(() => palms.reduce((acc, p) => acc + p.leafCount, 0), [palms])
 
+  const trunkGeo = useMemo(() => {
+    const geo = new THREE.CylinderGeometry(0.4, 0.5, 1, 10, 10)
+    geo.translate(0, 0.5, 0) // Center at bottom
+    return geo
+  }, [])
+
+  if (palms.length === 0) return null
+
   return (
     <group>
       {palms.map((palm, i) => (
-        <RigidBody key={i} type="fixed" colliders="cuboid" position={[palm.x, palm.height / 2, palm.z]} rotation={[palm.trunkLean, palm.trunkLeanDir, 0]}>
+        <RigidBody key={i} type="fixed" colliders="cuboid" position={[palm.x, -0.5 + palm.height / 2, palm.z]} rotation={[palm.trunkLean, palm.trunkLeanDir, 0]} includeInPhysics={gameState !== 'preview'}>
           <mesh visible={false}>
             <boxGeometry args={[0.8, palm.height, 0.8]} />
           </mesh>
         </RigidBody>
       ))}
 
-      <instancedMesh ref={setTrunkInstances} args={[undefined, undefined, palms.length]} castShadow receiveShadow>
-        <cylinderGeometry args={[0.4, 0.5, 1, 10, 10]} />
+      <instancedMesh ref={setTrunkInstances} args={[trunkGeo, undefined, palms.length]} castShadow receiveShadow>
         <shaderMaterial 
           ref={trunkMaterialRef} 
           args={[trunkShader]} 
           side={THREE.DoubleSide} 
-          transparent={true}
         />
       </instancedMesh>
 
@@ -365,14 +1365,17 @@ function Palms({ seed, rockData, leafGeometry }: { seed: number, rockData: { x: 
           args={[leafShader]} 
           vertexColors 
           side={THREE.DoubleSide} 
-          transparent={true}
+          alphaTest={0.5}
+          transparent={false}
+          depthWrite={true}
+          depthTest={true}
         />
       </instancedMesh>
     </group>
   )
 }
 
-function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: number, z: number, radius: number }[]) => void }) {
+function Rocks({ seed, onRockData, gameState }: { seed: number, onRockData: (rocks: { x: number, z: number, radius: number }[]) => void, gameState: 'preview' | 'playing' }) {
   const rocks = useMemo(() => {
     const random = mulberry32(seed * 67890);
     const data = []
@@ -412,7 +1415,7 @@ function Rocks({ seed, onRockData }: { seed: number, onRockData: (rocks: { x: nu
   return (
     <group>
       {rocks.map((rock, i) => (
-        <RigidBody key={i} type="fixed" colliders="hull" position={[rock.x, rock.scaleY / 2 - 0.6, rock.z]} rotation={[rock.rotationX, rock.rotationY, rock.rotationZ]}>
+        <RigidBody key={i} type="fixed" colliders="hull" position={[rock.x, rock.scaleY / 2 - 0.6, rock.z]} rotation={[rock.rotationX, rock.rotationY, rock.rotationZ]} includeInPhysics={gameState !== 'preview'}>
           <mesh castShadow receiveShadow>
             <dodecahedronGeometry args={[1, 1]} />
             <meshStandardMaterial color={rock.color} roughness={0.9} />
@@ -505,6 +1508,7 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
         pos.setX(i, pos.getX(i) * taper)
         pos.setZ(i, pos.getZ(i) + Math.pow(y, 1.5) * 0.3)
       }
+      geo.computeVertexNormals() // Added to ensure normals are correct after modification
       return geo
     }
 
@@ -522,6 +1526,7 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
         uIsPreview: { value: gameState === 'preview' ? 1.0 : 0.0 },
         ...THREE.UniformsLib.fog,
       },
+      alphaTest: 0.5,
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vInstanceColor;
@@ -642,6 +1647,10 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
         // #include <fog_pars_fragment>
         
         void main() {
+          // Simple discard for tapered plane
+          if (vUv.y > 0.95) discard;
+          if (abs(vUv.x - 0.5) > 0.45) discard;
+
           // Simplified lighting/shading
           vec3 baseColor = vInstanceColor * 0.2;
           vec3 tipColor = mix(vInstanceColor, vec3(0.9, 1.0, 0.4), 0.4);
@@ -751,7 +1760,7 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
 
   return (
     <group>
-      <instancedMesh ref={setNearInstances} args={[nearGeometry, undefined, NEAR_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
+      <instancedMesh ref={setNearInstances} args={[nearGeometry, undefined, NEAR_GRASS_COUNT]} castShadow receiveShadow>
         <shaderMaterial
           ref={nearMaterialRef}
           attach="material"
@@ -759,9 +1768,13 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
           vertexColors
           side={THREE.DoubleSide}
           fog={true}
+          transparent={false}
+          depthWrite={true}
+          depthTest={true}
+          alphaTest={0.5}
         />
       </instancedMesh>
-      <instancedMesh ref={setMidInstances} args={[midGeometry, undefined, MID_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
+      <instancedMesh ref={setMidInstances} args={[midGeometry, undefined, MID_GRASS_COUNT]} castShadow receiveShadow>
         <shaderMaterial
           ref={midMaterialRef}
           attach="material"
@@ -769,9 +1782,13 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
           vertexColors
           side={THREE.DoubleSide}
           fog={true}
+          transparent={false}
+          depthWrite={true}
+          depthTest={true}
+          alphaTest={0.5}
         />
       </instancedMesh>
-      <instancedMesh ref={setFarInstances} args={[farGeometry, undefined, FAR_GRASS_COUNT]} castShadow receiveShadow frustumCulled={false}>
+      <instancedMesh ref={setFarInstances} args={[farGeometry, undefined, FAR_GRASS_COUNT]} castShadow receiveShadow>
         <shaderMaterial
           ref={farMaterialRef}
           attach="material"
@@ -779,6 +1796,10 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
           vertexColors
           side={THREE.DoubleSide}
           fog={true}
+          transparent={false}
+          depthWrite={true}
+          depthTest={true}
+          alphaTest={0.5}
         />
       </instancedMesh>
     </group>
@@ -893,9 +1914,9 @@ function Flowers({ seed, rockData, gameState }: { seed: number, rockData: { x: n
   })
 
   return (
-    <instancedMesh ref={setInstances} args={[undefined, undefined, FLOWER_COUNT]} castShadow frustumCulled={false}>
+    <instancedMesh ref={setInstances} args={[undefined, undefined, FLOWER_COUNT]} castShadow>
       <sphereGeometry args={[0.5, 6, 6]} />
-      <shaderMaterial ref={materialRef} attach="material" args={[flowerShader]} vertexColors />
+      <shaderMaterial ref={materialRef} attach="material" args={[flowerShader]} vertexColors alphaTest={0.5} />
     </instancedMesh>
   )
 }
@@ -1005,7 +2026,7 @@ function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' 
   }), [seed, gameState])
 
   return (
-    <RigidBody type="fixed">
+    <RigidBody type="fixed" includeInPhysics={gameState !== 'preview'}>
       <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
         <planeGeometry args={[GRASS_RANGE, GRASS_RANGE]} />
         <shaderMaterial attach="material" args={[shader]} fog={false} />
@@ -1048,6 +2069,11 @@ function Ocean() {
         vec3 baseColor = vec3(0.0, 0.44, 0.62);
         vec3 shallowColor = vec3(0.0, 0.55, 0.7);
         vec3 color = mix(baseColor, shallowColor, n * 0.2);
+        
+        // Simple foam at shore simulation (very basic based on noise/uv)
+        float shore = smoothstep(0.4, 0.5, n);
+        color = mix(color, vec3(1.0), shore * 0.1);
+        
         gl_FragColor = vec4(color, 1.0);
       }
     `
@@ -1069,10 +2095,11 @@ function Ocean() {
 
 export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, gameState: 'preview' | 'playing' }) {
   const [rockData, setRockData] = useState<{ x: number, z: number, radius: number }[]>([])
+  const [palmData, setPalmData] = useState<{ x: number, z: number, radius: number }[]>([])
   
   const leafGeometry = useMemo(() => {
     const geo = new THREE.PlaneGeometry(1, 1, 1, 8) // 8 vertical segments for smooth bending
-    geo.translate(0, 0.5, 0) // Origin at bottom center
+    geo.translate(0, 0.5, 0) // Base at origin
     return geo
   }, [])
   
@@ -1092,14 +2119,14 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
         
         <ambientLight intensity={0.7} />
         <directionalLight
-          position={[50, 50, 50]}
-          intensity={1.5}
+          position={[50, 100, 50]}
+          intensity={2}
           castShadow
           shadow-mapSize={[2048, 2048]}
-          shadow-camera-left={-50}
-          shadow-camera-right={50}
-          shadow-camera-top={50}
-          shadow-camera-bottom={-50}
+          shadow-camera-left={-100}
+          shadow-camera-right={100}
+          shadow-camera-top={100}
+          shadow-camera-bottom={-100}
         />
         
         <Physics gravity={[0, -9.81, 0]} interpolate={false}>
@@ -1108,8 +2135,22 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
           <IslandGround seed={seed} gameState={gameState} />
           <Ocean />
           
-          <Rocks seed={seed} onRockData={setRockData} />
-          <Palms seed={seed} rockData={rockData} leafGeometry={leafGeometry} />
+          <Bushes seed={seed} rockData={rockData} palmData={palmData} />
+          <Rocks seed={seed} onRockData={setRockData} gameState={gameState} />
+          <Palms seed={seed} rockData={rockData} leafGeometry={leafGeometry} onPalmData={setPalmData} gameState={gameState} />
+          <Coconuts seed={seed} palmData={palmData as any} />
+          <Ferns seed={seed} rockData={rockData} palmData={palmData} />
+          <Bamboo seed={seed} rockData={rockData} palmData={palmData} />
+          <SandMounds seed={seed} />
+          <Driftwood seed={seed} />
+          <BeachDecor seed={seed} />
+          <Seaweed seed={seed} />
+          <WaterObjects seed={seed} />
+          <Crabs seed={seed} />
+          <AncientTotems seed={seed} rockData={rockData} />
+          <Structures seed={seed} />
+          <Torches seed={seed} />
+          <AtmosphericEffects seed={seed} gameState={gameState} />
           <Grass seed={seed} playerRef={playerRef} rockData={rockData} gameState={gameState} />
           <Flowers seed={seed} rockData={rockData} gameState={gameState} />
         </Physics>
