@@ -7,10 +7,19 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+
+# Build outputs
 dist
 dist-ssr
 *.local
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+lint.sh
 
 # Editor directories and files
 .vscode/*
@@ -23,8 +32,25 @@ dist-ssr
 *.sln
 *.sw?
 
-package-lock.json
-
+# Project specific
 .output.txt
 
-public/pirate.gltf
+# Frontend specific
+packages/frontend/dist
+packages/frontend/public/pirate.gltf
+packages/frontend/node_modules
+packages/frontend/package-lock.json
+packages/frontend/tsconfig.tsbuildinfo
+packages/frontend/yarn.lock
+packages/frontend/.env
+
+# Backend specific
+packages/backend/.env
+packages/backend/.env.local
+packages/backend/dist
+packages/backend/node_modules
+packages/backend/package-lock.json
+packages/backend/tsconfig.tsbuildinfo
+packages/backend/yarn.lock
+
+package-lock.json
