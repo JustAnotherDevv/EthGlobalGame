@@ -31,6 +31,14 @@ Install all dependencies for both packages:
 
 I used Claude code LLM and Antigravity to aid with building this project.
 
+Request Yellow tokens:
+
+```bash
+curl -XPOST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
+  -H "Content-Type: application/json" \
+  -d '{"userAddress":"<address>"}'
+```
+
 Run both frontend and backend concurrently:
 
 ```bash

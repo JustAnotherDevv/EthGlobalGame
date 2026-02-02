@@ -43,6 +43,7 @@ packages/frontend/package-lock.json
 packages/frontend/tsconfig.tsbuildinfo
 packages/frontend/yarn.lock
 packages/frontend/.env
+packages/frontend/.env.local
 
 # Backend specific
 packages/backend/.env
