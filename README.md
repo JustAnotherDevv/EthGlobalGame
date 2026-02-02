@@ -26,19 +26,15 @@ ethglobal-hackmoney/
 
 Install all dependencies for both packages:
 
-```bash
-npm install
-```
 
 ### Development
+
+I used Claude code LLM and Antigravity to aid with building this project.
 
 Run both frontend and backend concurrently:
 
 ```bash
 npm run dev
-```
-
-This will start:
 - **Frontend** on http://localhost:5173 (Vite dev server)
 - **Backend** on http://localhost:3001 (Express server)
 
