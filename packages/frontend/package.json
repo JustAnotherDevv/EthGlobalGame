@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@erc7824/nitrolite": "^0.5.3",
     "@hookform/resolvers": "^5.2.2",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -42,11 +43,13 @@
     "@react-three/fiber": "^9.5.0",
     "@react-three/rapier": "^2.2.0",
     "@tanstack/react-query": "^5.90.20",
+    "@types/ws": "^8.18.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
+    "ethers": "^5.7.2",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.563.0",
     "next-themes": "^0.4.6",

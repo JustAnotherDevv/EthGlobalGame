@@ -3,6 +3,7 @@ import './App.css'
 import { Scene } from "@/components/three/Scene"
 import { MainMenu } from "@/components/MainMenu"
 import { DebugUI } from "@/components/DebugUI"
+import { YellowDebugUI } from "@/components/YellowDebugUI"
 import * as THREE from 'three'
 
 type GameState = 'menu' | 'preview' | 'playing'
@@ -30,6 +31,7 @@ function App() {
       <Scene seed={seed} playerRef={playerRef} gameState={gameState} />
       
       {gameState === 'playing' && <DebugUI playerRef={playerRef} />}
+      <YellowDebugUI />
       
       {gameState === 'playing' && (
         <div className="absolute top-4 left-4 p-4 bg-background/80 backdrop-blur rounded-lg border shadow-sm pointer-events-none">

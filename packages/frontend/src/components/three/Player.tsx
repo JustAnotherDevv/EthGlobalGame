@@ -14,12 +14,12 @@ const targetVelocity = new THREE.Vector3()
 const cameraOffset = new THREE.Vector3()
 const idealOffset = new THREE.Vector3(0, 5, 7)
 const smoothedHorizontalRotation = { current: 0 }
-const smoothedLookAtY = { current: 0 }
+// const smoothedLookAtY = { current: 0 }
 const smoothedLookAtPosition = new THREE.Vector3() // Smooth lookAt target to prevent tilting
 
 export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
   const smoothedY = useRef(0)
-  const smoothedCameraY = useRef(0)
+  // const smoothedCameraY = useRef(0)
   const stableGroundY = useRef(0) // Track stable ground height when grounded
   const rb = useRef<RapierRigidBody>(null)
   const groupRef = useRef<THREE.Group>(null)
@@ -193,7 +193,8 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     // rbVelocity already declared above
     // const rbVelocity = rb.current.linvel()
 
-    const lookAtY = (isGrounded ? (smoothedY.current || translation.y) : translation.y) + 1.5
+    // const lookAtY = (isGrounded ? (smoothedY.current || translation.y) : translation.y) + 1.5
+    // const lookAtY = translation.y + 1.5
 
     // Use lerp for smoother velocity transitions
     const lerpFactor = 1 - Math.pow(0.001, delta)

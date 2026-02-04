@@ -8,6 +8,8 @@ import { RainbowKitProvider } from '@rainbow-me/rainbowkit'
 import { config } from './config/wagmi'
 import '@rainbow-me/rainbowkit/styles.css'
 
+import { YellowProvider } from './contexts/YellowContext'
+
 const queryClient = new QueryClient()
 
 createRoot(document.getElementById('root')!).render(
@@ -15,7 +17,9 @@ createRoot(document.getElementById('root')!).render(
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
-          <App />
+          <YellowProvider>
+            <App />
+          </YellowProvider>
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
