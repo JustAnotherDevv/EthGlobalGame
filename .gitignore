@@ -37,7 +37,6 @@ lint.sh
 
 # Frontend specific
 packages/frontend/dist
-packages/frontend/public/pirate.gltf
 packages/frontend/node_modules
 packages/frontend/package-lock.json
 packages/frontend/tsconfig.tsbuildinfo
