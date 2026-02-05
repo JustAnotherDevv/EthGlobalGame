@@ -41,8 +41,9 @@ interface YellowContextType {
   allChannels: any[]; // All open channels
   setupSession: () => Promise<void>;
   openChannel: () => Promise<void>;
-  fundChannel: (amount: string) => Promise<void>;
+  fundChannel: (amount: string, channelId?: string) => Promise<void>;
   closeChannel: (channelId: string) => Promise<void>;
+  withdrawFromUnified: (amount: string) => Promise<void>;
   requestFaucet: () => Promise<void>;
   listNetworks: () => Promise<void>;
   fetchAllChannels: () => Promise<void>;
@@ -65,6 +66,7 @@ const YellowContext = createContext<YellowContextType>({
   openChannel: async () => {},
   fundChannel: async () => {},
   closeChannel: async () => {},
+  withdrawFromUnified: async () => {},
   requestFaucet: async () => {},
   listNetworks: async () => {},
   fetchAllChannels: async () => {},
@@ -228,7 +230,8 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
             if (state.allocations && address) {
                 const userAlloc = state.allocations.find((a: any) => a.destination.toLowerCase() === address.toLowerCase());
                 if (userAlloc) {
-                    userBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
+                    // Yellow uses 8 decimals for ytest.usd allocations in state
+                    userBalance = (Number(userAlloc.amount) / 1e8).toFixed(8);
                 }
             }
 
@@ -253,6 +256,11 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
             };
             setActiveChannel(newChannel);
             activeChannelRef.current = newChannel;
+
+            // Add to allChannels array immediately
+            const updatedAllChannels = [...allChannelsRef.current, newChannel];
+            setAllChannels(updatedAllChannels);
+            allChannelsRef.current = updatedAllChannels;
 
             console.log('⏳ Channel created. Waiting for transaction confirmation...');
 
@@ -426,7 +434,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
              });
              console.log('✅ Channel Resized/Funded Successfully!');
 
-             // Update channel with new state and balance
+             // Update channel with new state and balance in both activeChannel and allChannels
              const current = activeChannelRef.current;
              if (current && current.id === channel_id) {
                  // Calculate new balance for user from the resize state
@@ -435,14 +443,19 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                      a.destination.toLowerCase() === address?.toLowerCase()
                  );
                  if (userAlloc) {
-                     newBalance = (Number(userAlloc.amount) / 1e18).toFixed(6); // Show more decimals
+                     // Yellow uses 8 decimals for ytest.usd
+                     newBalance = (Number(userAlloc.amount) / 1e8).toFixed(8);
                  }
 
                  console.log('💰 Updated channel balance:', newBalance, 'TEST');
 
+                 // Channel is ready after successful resize (transaction completed on-chain)
                  const updated = {
                      ...current,
                      balance: newBalance,
+                     status: 'open',
+                     txConfirmed: true,
+                     isReady: true,
                      state: {
                          ...resize_state,
                          server_signature: resize_state.server_signature || payload.server_signature,
@@ -452,13 +465,34 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                  setActiveChannel(updated);
                  activeChannelRef.current = updated;
 
-                 // Request updated unified balance
-                 requestUnifiedBalance();
+                 // Also update in allChannels array
+                 const updatedAllChannels = allChannelsRef.current.map((c: any) =>
+                     c.id === channel_id ? updated : c
+                 );
+                 setAllChannels(updatedAllChannels);
+                 allChannelsRef.current = updatedAllChannels;
+
+                 // Request updated unified balance with delay to allow broker to process
+                 // Try multiple times with increasing delays
+                 setTimeout(() => requestUnifiedBalance(), 2000);
+                 setTimeout(() => requestUnifiedBalance(), 4000);
              }
              
           } catch (err) {
               console.error('Failed to resize channel:', err);
           }
+      }
+
+      // Handle close_channel response
+      if (response.res && response.res[1] === 'close_channel') {
+          const closeData = response.res[2];
+          console.log('✅ Channel close initiated:', closeData);
+
+          // Refresh unified balance after a brief delay
+          setTimeout(() => {
+              requestUnifiedBalance();
+              fetchAllChannels();
+          }, 1000);
       }
 
       // Handle Errors
@@ -494,7 +528,8 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                        a.destination.toLowerCase() === address.toLowerCase()
                    );
                    if (userAlloc) {
-                       updatedBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
+                       // Yellow uses 8 decimals for ytest.usd
+                       updatedBalance = (Number(userAlloc.amount) / 1e8).toFixed(8);
                    }
                }
 
@@ -512,6 +547,13 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
                setActiveChannel(updatedChannel);
                activeChannelRef.current = updatedChannel;
+
+               // Also update in allChannels array
+               const updatedAllChannels = allChannelsRef.current.map((c: any) =>
+                   c.id === cuData.channel_id ? updatedChannel : c
+               );
+               setAllChannels(updatedAllChannels);
+               allChannelsRef.current = updatedAllChannels;
 
                if (isReady && !currentChannel.isReady) {
                    console.log('✅ Channel is now OPEN and ready for operations!');
@@ -533,7 +575,8 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                if (testBalance) {
                    console.log('Found ytest.usd balance:', testBalance);
                    // Yellow uses 8 decimals for ytest.usd (not 18)
-                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(8);
+                   console.log('🔄 Unified Balance Change:', unifiedBalance, '→', formattedBalance);
                    setUnifiedBalance(formattedBalance);
                    console.log('Unified Balance Updated:', formattedBalance);
                } else {
@@ -544,7 +587,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                // Find ytest.usd balance
                const testBalance = balanceData.balances.find((b: any) => b.asset === 'ytest.usd');
                if (testBalance) {
-                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(8);
                    setUnifiedBalance(formattedBalance);
                    console.log('Unified Balance Updated:', formattedBalance);
                }
@@ -553,7 +596,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                // Handle array format
                const testBalance = balanceData.find((b: any) => b.asset === 'ytest.usd');
                if (testBalance) {
-                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(8);
                    setUnifiedBalance(formattedBalance);
                    console.log('Unified Balance Updated:', formattedBalance);
                }
@@ -564,6 +607,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       if (response.res && response.res[1] === 'channels') {
           const channelsData = response.res[2];
           console.log('Existing Channels Data:', channelsData);
+          console.log('📊 Channel count in response:', Array.isArray(channelsData) ? channelsData.length : channelsData?.channels?.length || 0);
 
           let channelsList: any[] = [];
           if (Array.isArray(channelsData)) {
@@ -574,38 +618,46 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
           if (channelsList.length > 0) {
               // Process all channels and calculate balances
-              const processedChannels = channelsList.map((chan: any) => {
-                  const chanId = chan.channel_id || chan.id;
-                  const chanStatus = chan.status || 'unknown';
+              const processedChannels = channelsList
+                  .filter((chan: any) => {
+                      const chanStatus = chan.status || 'unknown';
+                      // Filter out channels that are closing, resizing, or in transition states
+                      return chanStatus === 'open' || chanStatus === 'active';
+                  })
+                  .map((chan: any) => {
+                      const chanId = chan.channel_id || chan.id;
+                      const chanStatus = chan.status || 'unknown';
 
-                  let channelBalance = 'Unknown';
+                      let channelBalance = 'Unknown';
 
-                  // Use 'amount' from summary if available
-                  if (chan.amount) {
-                      channelBalance = (Number(chan.amount) / 1e18).toFixed(8);
-                  }
+                      // Use 'amount' from summary if available
+                      if (chan.amount) {
+                          // Yellow uses 8 decimals for ytest.usd
+                          channelBalance = (Number(chan.amount) / 1e8).toFixed(8);
+                      }
 
-                  // Check if state is present with allocations
-                  if (chan.state && chan.state.allocations && address) {
-                       const userAlloc = chan.state.allocations.find((a: any) =>
-                           a.destination.toLowerCase() === address.toLowerCase()
-                       );
-                       if (userAlloc) {
-                           channelBalance = (Number(userAlloc.amount) / 1e18).toFixed(8);
-                       }
-                  }
+                      // Check if state is present with allocations
+                      if (chan.state && chan.state.allocations && address) {
+                           const userAlloc = chan.state.allocations.find((a: any) =>
+                               a.destination.toLowerCase() === address.toLowerCase()
+                           );
+                           if (userAlloc) {
+                               // Yellow uses 8 decimals for ytest.usd
+                               channelBalance = (Number(userAlloc.amount) / 1e8).toFixed(8);
+                           }
+                      }
 
-                  const isReady = chanStatus === 'open';
+                      const isReady = chanStatus === 'open';
 
-                  return {
-                      id: chanId,
-                      status: chanStatus,
-                      balance: channelBalance,
-                      channel: chan.channel,
-                      state: chan.state,
-                      isReady: isReady
-                  };
-              });
+                      return {
+                          id: chanId,
+                          status: chanStatus,
+                          balance: channelBalance,
+                          channel: chan.channel,
+                          state: chan.state,
+                          isReady: isReady
+                      };
+                  });
 
               // Update all channels state
               setAllChannels(processedChannels);
@@ -638,7 +690,8 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                if (state.allocations && address) {
                    const userAlloc = state.allocations.find((a: any) => a.destination.toLowerCase() === address.toLowerCase());
                    if (userAlloc) {
-                       restoredBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
+                       // Yellow uses 8 decimals for ytest.usd
+                       restoredBalance = (Number(userAlloc.amount) / 1e8).toFixed(8);
                    }
                }
                
@@ -793,30 +846,81 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
 
 
-  const fundChannel = async (amount: string) => {
-      if (!sessionKeyRef.current || !activeChannel) {
+  const fundChannel = async (amount: string, channelId?: string) => {
+      const targetChannelId = channelId || activeChannel?.id;
+
+      if (!sessionKeyRef.current || !targetChannelId) {
           console.error('Cannot fund: session or channel missing');
           return;
       }
 
-      if (!activeChannel.isReady) {
-          console.error('❌ Cannot allocate: Channel is not ready yet (status: ' + activeChannel.status + ')');
+      // Find the channel in allChannels
+      const targetChannel = allChannelsRef.current.find((c: any) => c.id === targetChannelId);
+
+      if (!targetChannel) {
+          console.error('Channel not found:', targetChannelId);
+          return;
+      }
+
+      if (!targetChannel.isReady) {
+          console.error('❌ Cannot allocate: Channel is not ready yet (status: ' + targetChannel.status + ')');
           alert('Channel is not ready yet. Please wait for on-chain confirmation.');
           return;
       }
 
-      console.log(`Funding Channel ${activeChannel.id} with ${amount}...`);
+      // If channel state is missing, fetch it from on-chain
+      if (!targetChannel.state && clientRef.current) {
+          console.log('⚠️ Channel state missing, fetching from on-chain...');
+          try {
+              const channelData = await clientRef.current.getChannelData(targetChannelId as `0x${string}`);
+              console.log('📥 Fetched channel data from chain:', channelData);
+
+              // Update the channel in allChannels with the state
+              const updatedChannels = allChannelsRef.current.map((c: any) => {
+                  if (c.id === targetChannelId) {
+                      return {
+                          ...c,
+                          state: channelData.lastValidState,
+                          channel: channelData.channel
+                      };
+                  }
+                  return c;
+              });
+
+              setAllChannels(updatedChannels);
+              allChannelsRef.current = updatedChannels;
+
+              // Update activeChannel if it's the same
+              if (activeChannel?.id === targetChannelId) {
+                  const updated = updatedChannels.find((c: any) => c.id === targetChannelId);
+                  setActiveChannel(updated);
+                  activeChannelRef.current = updated;
+              }
+
+              // Now retry the funding with updated state
+              console.log('🔄 Retrying allocation with fetched state...');
+              // Give a brief moment for state to update
+              setTimeout(() => fundChannel(amount, channelId), 500);
+              return;
+          } catch (err) {
+              console.error('Failed to fetch channel data:', err);
+              alert('Failed to fetch channel state. Please refresh the page.');
+              return;
+          }
+      }
+
+      console.log(`Funding Channel ${targetChannelId} with ${amount}...`);
 
       const signer = createECDSAMessageSigner(sessionKeyRef.current);
 
       try {
-          // Convert amount to BigInt elements (assuming 18 decimals input string)
-          const amountBI = BigInt(Number(amount) * 1e18);
+          // Convert amount to BigInt elements (Yellow uses 8 decimals for ytest.usd)
+          const amountBI = BigInt(Math.floor(Number(amount) * 1e8));
 
           const resizeMsg = await createResizeChannelMessage(
               signer,
               {
-                  channel_id: activeChannel.id,
+                  channel_id: targetChannelId,
                   allocate_amount: amountBI, // This pulls from unified balance
                   funds_destination: address as `0x${string}`, // User's address
               }
@@ -851,49 +955,55 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       }
   };
 
-  const closeChannel = async (channelId: string) => {
-      if (!sessionKeyRef.current || !address) {
-          console.error('Cannot close: session or address missing');
+  const withdrawFromUnified = async (amount: string) => {
+      if (!clientRef.current || !address) {
+          console.error('Cannot withdraw: client or address missing');
           return;
       }
 
-      console.log(`🔒 Closing Channel ${channelId}...`);
-
-      const signer = createECDSAMessageSigner(sessionKeyRef.current);
+      console.log(`💸 Withdrawing ${amount} TEST from unified balance to Sepolia...`);
 
       try {
-          const closeMsg = await createCloseChannelMessage(
-              signer,
-              channelId,
-              address
+          // Find the token address from supported assets
+          let tokenAddr = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'; // Default fallback
+          const asset = supportedAssets.find((a: any) => a.chain_id === 11155111);
+          if (asset && asset.token) {
+              tokenAddr = asset.token;
+              console.log('Using token address from config:', tokenAddr);
+          } else {
+              console.warn('Using fallback token address');
+          }
+
+          // Convert amount to proper format (8 decimals for ytest.usd)
+          const amountBI = BigInt(Math.floor(Number(amount) * 1e8));
+
+          console.log('Initiating withdrawal transaction...');
+          const withdrawalTx = await clientRef.current.withdrawal(
+              tokenAddr as `0x${string}`,
+              amountBI
           );
-          ws.current?.send(closeMsg);
-          console.log('📤 Close channel request sent to broker');
+
+          console.log('✅ Withdrawal transaction submitted:', withdrawalTx);
+          alert(`Withdrawal initiated! Transaction hash: ${withdrawalTx}`);
+
+          // Wait for transaction confirmation
+          if (publicClient && withdrawalTx) {
+              console.log('Waiting for transaction confirmation...');
+              const receipt = await publicClient.waitForTransactionReceipt({
+                  hash: withdrawalTx as `0x${string}`,
+                  confirmations: 1
+              });
+              console.log('✅ Withdrawal confirmed!', receipt);
+
+              // Refresh balances after confirmation
+              setTimeout(() => {
+                  refreshBalance();
+                  requestUnifiedBalance();
+              }, 2000);
+          }
       } catch (err) {
-          console.error('Error creating close message:', err);
-      }
-  };
-
-  const closeChannel = async (channelId: string) => {
-      if (!sessionKeyRef.current || !address) {
-          console.error('Cannot close: session or address missing');
-          return;
-      }
-
-      console.log(`🔒 Closing Channel ${channelId}...`);
-
-      const signer = createECDSAMessageSigner(sessionKeyRef.current);
-
-      try {
-          const closeMsg = await createCloseChannelMessage(
-              signer,
-              channelId,
-              address
-          );
-          ws.current?.send(closeMsg);
-          console.log('📤 Close channel request sent to broker');
-      } catch (err) {
-          console.error('Error creating close message:', err);
+          console.error('Failed to withdraw:', err);
+          alert(`Withdrawal failed: ${err}`);
       }
   };
 
@@ -930,7 +1040,15 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
       try {
           const signer = createECDSAMessageSigner(sessionKeyRef.current);
-          const channelsMsg = await createGetChannelsMessage(signer);
+
+          // Note: Yellow Network broker may limit channel responses (typically to 10)
+          // We can only request channels for a specific participant (user)
+          // The SDK doesn't expose pagination parameters, so we get what the broker returns
+          const channelsMsg = await createGetChannelsMessage(
+              signer,
+              address as `0x${string}`, // Filter by participant address to get user's channels
+              undefined, // status filter (undefined = all statuses)
+          );
           ws.current.send(channelsMsg);
       } catch (err) {
           console.error('Failed to fetch channels:', err);
@@ -1018,6 +1136,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       openChannel,
       fundChannel,
       closeChannel,
+      withdrawFromUnified,
       requestFaucet,
       listNetworks,
       fetchAllChannels

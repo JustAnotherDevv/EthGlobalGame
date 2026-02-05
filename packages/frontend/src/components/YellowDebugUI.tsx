@@ -19,15 +19,17 @@ export function YellowDebugUI() {
     openChannel,
     fundChannel,
     closeChannel,
+    withdrawFromUnified,
     requestFaucet,
     listNetworks,
     activeChannel,
     allChannels,
     fetchAllChannels
   } = useYellow();
-  
+
   const { isConnected: isWalletConnected } = useAccount();
   const [loading, setLoading] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState('0.1');
 
   const handleInit = async () => {
     setLoading(true);
@@ -76,9 +78,36 @@ export function YellowDebugUI() {
                  <span className="font-mono text-[10px]">{balance}</span>
               </div>
               <div className="flex justify-between text-xs">
-                 <span className="text-muted-foreground">Unified:</span>
+                 <span className="text-muted-foreground" title="Off-chain balance in Yellow clearing layer">Unified:</span>
                  <span className="font-mono font-semibold text-yellow-500">{unifiedBalance} TEST</span>
               </div>
+
+              {/* Withdraw from Unified Balance */}
+              {parseFloat(unifiedBalance) > 0 && (
+                <div className="space-y-1 pt-2 border-t">
+                  <div className="flex gap-1">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.001"
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      className="flex-1 h-7 px-2 text-xs rounded bg-muted border border-gray-600"
+                      placeholder="Amount"
+                    />
+                    <Button
+                      variant="default"
+                      size="sm"
+                      onClick={() => withdrawFromUnified(withdrawAmount)}
+                      disabled={!withdrawAmount || parseFloat(withdrawAmount) <= 0 || parseFloat(withdrawAmount) > parseFloat(unifiedBalance)}
+                      className="h-7 text-[10px] text-white"
+                    >
+                      Withdraw to Sepolia
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               <Button variant="outline" size="sm" onClick={() => refreshBalance()} className="w-full h-8 text-white">
                 Refresh Balance
               </Button>
@@ -147,7 +176,7 @@ export function YellowDebugUI() {
                                         <Button
                                             variant="secondary"
                                             size="sm"
-                                            onClick={() => fundChannel('0.1')}
+                                            onClick={() => fundChannel('0.1', channel.id)}
                                             disabled={!channel.isReady}
                                             className="flex-1 h-6 mt-2 text-[10px] text-white"
                                         >
