@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, type ReactNode, useRef } from 'react';
 import { useWalletClient, usePublicClient, useAccount } from 'wagmi';
-import { 
-  NitroliteClient, 
+import {
+  NitroliteClient,
   WalletStateSigner,
   createGetConfigMessage,
   createAuthRequestMessage,
@@ -9,7 +9,10 @@ import {
   createAuthVerifyMessageFromChallenge,
   createCreateChannelMessage,
   createECDSAMessageSigner,
-  createResizeChannelMessage
+  createResizeChannelMessage,
+  createGetLedgerBalancesMessage,
+  createGetChannelsMessage,
+  createCloseChannelMessage
 } from '@erc7824/nitrolite';
 import { sepolia } from 'viem/chains';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -27,18 +30,22 @@ interface YellowContextType {
   isConnected: boolean;
   initialize: () => Promise<void>;
   balance: string;
+  unifiedBalance: string;
   refreshBalance: () => Promise<void>;
-  
+
   // Broker / Session
   brokerConnected: boolean;
   supportedNetworks: any[];
   sessionAddress: string | null;
   activeChannel: any; // Add strong typing later
+  allChannels: any[]; // All open channels
   setupSession: () => Promise<void>;
   openChannel: () => Promise<void>;
   fundChannel: (amount: string) => Promise<void>;
+  closeChannel: (channelId: string) => Promise<void>;
   requestFaucet: () => Promise<void>;
   listNetworks: () => Promise<void>;
+  fetchAllChannels: () => Promise<void>;
 }
 
 const YellowContext = createContext<YellowContextType>({
@@ -46,17 +53,21 @@ const YellowContext = createContext<YellowContextType>({
   isConnected: false,
   initialize: async () => {},
   balance: '0',
+  unifiedBalance: '0',
   refreshBalance: async () => {},
-  
+
   brokerConnected: false,
   supportedNetworks: [],
   sessionAddress: null,
   activeChannel: null,
+  allChannels: [],
   setupSession: async () => {},
   openChannel: async () => {},
   fundChannel: async () => {},
+  closeChannel: async () => {},
   requestFaucet: async () => {},
   listNetworks: async () => {},
+  fetchAllChannels: async () => {},
 });
 
 export const useYellow = () => useContext(YellowContext);
@@ -67,7 +78,8 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
   const { address, isConnected: isWalletConnected } = useAccount();
   const [client, setClient] = useState<NitroliteClient | null>(null);
   const [balance, setBalance] = useState('0');
-  
+  const [unifiedBalance, setUnifiedBalance] = useState('0');
+
   // -- Broker State --
   const ws = useRef<WebSocket | null>(null);
   const [brokerConnected, setBrokerConnected] = useState(false);
@@ -76,14 +88,20 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
   
   // Use refs for values accessed in callbacks to avoid stale closures
   const sessionKeyRef = useRef<`0x${string}` | null>(null);
+  const authParamsRef = useRef<any>(null); // Store auth params for challenge verification
   const isAuthenticatedRef = useRef(false);
   const clientRef = useRef<NitroliteClient | null>(null);
 
   // Sync refs with state for UI if needed (keeping state for UI re-renders)
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
-  
+
   // State for active channel
   const [activeChannel, setActiveChannel] = useState<any>(null);
+  const activeChannelRef = useRef<any>(null); // Ref to avoid stale closure in callbacks
+
+  // State for all channels
+  const [allChannels, setAllChannels] = useState<any[]>([]);
+  const allChannelsRef = useRef<any[]>([]); // Ref to avoid stale closure
 
   useEffect(() => {
     if (!isWalletConnected || !walletClient) {
@@ -118,22 +136,11 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       };
 
       socket.onmessage = handleBrokerMessage;
-      
+
       ws.current = socket;
 
-      // Heartbeat
-      const pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-              console.log('Ping Broker');
-              socket.send(JSON.stringify({ type: 'ping' })); // Or any keep-alive msg
-          }
-      }, 30000); // 30s
-
-      socket.onclose = () => {
-         console.log('Broker Disconnected');
-         setBrokerConnected(false);
-         clearInterval(pingInterval);
-      };
+      // Note: Yellow Network broker doesn't require ping/keepalive messages
+      // The WebSocket connection stays alive automatically
     });
   };
 
@@ -144,29 +151,22 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
       if (response.res && response.res[1] === 'auth_challenge') {
         const challenge = response.res[2].challenge_message;
-        
+
         // Need to sign this challenge using EIP-712 with main wallet
         if (!walletClient || !address) return;
 
-        // Reconstruct authParams we sent (we need to store them or recreate)
-        const currentSessionKey = sessionKeyRef.current;
-        if (!currentSessionKey) {
-            console.error('Session Key missing during auth challenge');
+        // Use the stored authParams that we sent in auth_request
+        const authParams = authParamsRef.current;
+        if (!authParams) {
+            console.error('Auth params missing during auth challenge');
             return;
         }
 
-        const sessionAccount = privateKeyToAccount(currentSessionKey); 
-        
-        const authParams = {
-          session_key: sessionAccount.address,
-          allowances: [{ asset: 'ytest.usd', amount: '1000000000' }],
-          expires_at: BigInt(Math.floor(Date.now() / 1000) + 3600),
-          scope: 'test.app',
-        };
+        console.log('Signing challenge with authParams:', authParams);
 
         const signer = createEIP712AuthMessageSigner(
-          walletClient as any, 
-          authParams, 
+          walletClient as any,
+          authParams,
           { name: 'Test app' }
         );
 
@@ -182,6 +182,11 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       if (response.res && response.res[1] === 'auth_verify') {
         console.log('✓ Session Authenticated!');
         isAuthenticatedRef.current = true;
+        // Request initial unified balance and all channels after auth
+        setTimeout(() => {
+          requestUnifiedBalance();
+          fetchAllChannels();
+        }, 500);
       }
       
       if (response.res && response.res[1] === 'create_channel') {
@@ -214,9 +219,10 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                 unsignedInitialState,
                 serverSignature: server_signature,
             });
-            
+
             console.log('Channel on-chain creation submitted:', createResult);
-            
+            console.log('Initial State from createResult:', createResult.initialState);
+
             // Calculate initial off-chain balance for user
             let userBalance = '0.00';
             if (state.allocations && address) {
@@ -226,15 +232,83 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
                 }
             }
 
-            // Store active channel details
-            setActiveChannel({
+            // The createChannel result includes the signed initial state
+            // We should use that instead of the unsigned state from the broker
+            const signedInitialState = createResult.initialState;
+
+            // Store active channel details IMMEDIATELY so cu handler can find it
+            const newChannel = {
                 id: channel_id,
-                status: 'Open', 
-                balance: userBalance, 
+                status: 'Confirming', // Channel tx submitted, waiting for confirmation
+                balance: userBalance,
                 channel: channel,
-                state: state
-            });
-            
+                state: {
+                    ...state,
+                    server_signature: server_signature, // Store server signature for later use in proofs
+                    // Include the signatures from the signed initial state returned by SDK
+                    sigs: signedInitialState?.sigs || []
+                },
+                isReady: false, // Not ready for operations yet
+                txConfirmed: false // Will be set to true after confirmation
+            };
+            setActiveChannel(newChannel);
+            activeChannelRef.current = newChannel;
+
+            console.log('⏳ Channel created. Waiting for transaction confirmation...');
+
+            // Wait for transaction to be confirmed in background
+            if (createResult.txHash && publicClient) {
+                publicClient.waitForTransactionReceipt({
+                    hash: createResult.txHash as `0x${string}`,
+                    confirmations: 1
+                }).then((receipt) => {
+                    console.log('✅ Channel creation transaction confirmed!', receipt);
+                    // Update channel to mark tx as confirmed
+                    const current = activeChannelRef.current;
+                    if (current && current.id === channel_id) {
+                        // Re-evaluate isReady now that tx is confirmed
+                        const isReady = current.status === 'open' && true;
+                        const updated = {
+                            ...current,
+                            txConfirmed: true,
+                            isReady: isReady
+                        };
+                        setActiveChannel(updated);
+                        activeChannelRef.current = updated;
+
+                        if (isReady) {
+                            console.log('✅ Channel is now OPEN and ready for operations!');
+                        } else {
+                            console.log('⏳ Transaction confirmed. Waiting for broker to confirm status...');
+                        }
+                    }
+                }).catch((err) => {
+                    console.warn('Could not wait for transaction receipt:', err);
+                });
+            }
+
+            // Poll channel status until it's confirmed (open)
+            const pollChannelStatus = setInterval(async () => {
+                if (!ws.current || !sessionKeyRef.current) {
+                    clearInterval(pollChannelStatus);
+                    return;
+                }
+
+                // Request channel list using proper signed message
+                try {
+                    const signer = createECDSAMessageSigner(sessionKeyRef.current);
+                    const channelsMsg = await createGetChannelsMessage(signer);
+                    ws.current.send(channelsMsg);
+                } catch (err) {
+                    console.error('Failed to poll channel status:', err);
+                }
+            }, 3000); // Poll every 3 seconds
+
+            // Stop polling after 30 seconds
+            setTimeout(() => {
+                clearInterval(pollChannelStatus);
+            }, 30000);
+
         } catch (err) {
             console.error('Failed to create channel on-chain:', err);
         }
@@ -245,24 +319,92 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
           console.log('Resize Proposal Received');
           const payload = response.res[2];
           console.log('Resize Payload:', payload);
-          
+
           const channel_id = payload.channel_id || payload.id;
           const resize_state = payload.resize_state || payload.state; // Fallback to 'state'
-          const proof_states = payload.proof_states || [];
+          let proof_states = payload.proof_states || [];
 
           if (!resize_state) {
               console.error('Resize State missing in payload', payload);
               return;
           }
-          
+
           const client = clientRef.current;
           if (!client) return;
-          
+
+          // Build proof states array - we need the current on-chain state as proof
+          const transformedProofStates: any[] = [];
+
+          // Use ref to get current channel state (avoid stale closure)
+          const currentChannel = activeChannelRef.current;
+
+          // If we have the current channel state, add it as proof
+          if (currentChannel && currentChannel.state) {
+              console.log('Using current channel state as proof:', currentChannel.state);
+
+              // Important: For the initial state (version 0), we don't need client signatures
+              // The initial state was created by createChannel and only has server signature
+              // For version 0, we should provide an empty sigs array or just server sig
+              // Actually looking at the SDK, for proof states we shouldn't include sigs at all for version 0
+
+              // Check if this is the initial state (version 0)
+              const isInitialState = (currentChannel.state.version || 0) === 0;
+
+              const proofState: any = {
+                  intent: currentChannel.state.intent || 1,
+                  version: BigInt(currentChannel.state.version || 0),
+                  data: currentChannel.state.state_data || currentChannel.state.data || '0x',
+                  allocations: (currentChannel.state.allocations || []).map((a: any) => ({
+                      destination: a.destination,
+                      token: a.token,
+                      amount: BigInt(a.amount),
+                  }))
+              };
+
+              // Use the sigs array from the SDK if available
+              if (currentChannel.state.sigs && currentChannel.state.sigs.length > 0) {
+                  proofState.sigs = currentChannel.state.sigs;
+                  console.log('Using sigs from state:', currentChannel.state.sigs);
+              } else {
+                  console.warn('No sigs array found in state, this may cause issues');
+              }
+
+              console.log('Transformed proof state:', proofState);
+              transformedProofStates.push(proofState);
+          } else {
+              console.error('❌ No active channel state available for proof!');
+              console.log('Current channel:', currentChannel);
+              console.warn('⚠️ Cannot complete resize without channel state. This likely means:');
+              console.warn('1. Page was reloaded and channel state was lost');
+              console.warn('2. An automatic resize was triggered by the broker');
+              console.warn('Solution: Refresh the page to reset the channel state, or wait for the ongoing resize to timeout.');
+              // Don't proceed with resize if we don't have the proof
+              return;
+          }
+
+          // Also transform any proof_states from the broker
+          if (proof_states && proof_states.length > 0) {
+              console.log('Broker provided proof_states:', proof_states);
+              proof_states.forEach((ps: any) => {
+                  transformedProofStates.push({
+                      channelId: channel_id,
+                      serverSignature: ps.server_signature || ps.signature || '0x',
+                      intent: ps.intent,
+                      version: BigInt(ps.version),
+                      data: ps.state_data || ps.data || '0x',
+                      allocations: ps.allocations.map((a: any) => ({
+                          destination: a.destination,
+                          token: a.token,
+                          amount: BigInt(a.amount),
+                      })),
+                  });
+              });
+          }
+
           // Transform resize_state to match SignedState interface
-          // SDK requires channelId and serverSignature in the state object for resizeChannel
           const signedResizeState = {
               channelId: channel_id,
-              serverSignature: resize_state.server_signature || resize_state.signature || payload.server_signature || '0x', // Check payload too
+              serverSignature: resize_state.server_signature || resize_state.signature || payload.server_signature || '0x',
               intent: resize_state.intent,
               version: BigInt(resize_state.version),
               data: resize_state.state_data || resize_state.data || '0x',
@@ -273,31 +415,45 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
               })),
           };
 
-          console.log('Submitting transformed resize to blockchain...', signedResizeState);
+          console.log('Submitting resize to blockchain...');
+          console.log('- Resize State:', signedResizeState);
+          console.log('- Proof States:', transformedProofStates);
+
           try {
-             // Docs says: client.resizeChannel({ resizeState, proofStates })
              await client.resizeChannel({
                  resizeState: signedResizeState,
-                 proofStates: proof_states
+                 proofStates: transformedProofStates
              });
-             console.log('Channel Resized/Funded Successfully!');
-             
-             // Optimistic update
-             if (activeChannel) {
-                 // Calculate new balance for user
-                 let newBalance = activeChannel.balance;
-                 const userAlloc = signedResizeState.allocations.find((a: any) => a.destination.toLowerCase() === address?.toLowerCase());
+             console.log('✅ Channel Resized/Funded Successfully!');
+
+             // Update channel with new state and balance
+             const current = activeChannelRef.current;
+             if (current && current.id === channel_id) {
+                 // Calculate new balance for user from the resize state
+                 let newBalance = current.balance;
+                 const userAlloc = signedResizeState.allocations.find((a: any) =>
+                     a.destination.toLowerCase() === address?.toLowerCase()
+                 );
                  if (userAlloc) {
-                     newBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
+                     newBalance = (Number(userAlloc.amount) / 1e18).toFixed(6); // Show more decimals
                  }
-                 setActiveChannel({
-                     ...activeChannel,
+
+                 console.log('💰 Updated channel balance:', newBalance, 'TEST');
+
+                 const updated = {
+                     ...current,
                      balance: newBalance,
                      state: {
-                         ...activeChannel.state,
-                         ...resize_state // Merge new state
+                         ...resize_state,
+                         server_signature: resize_state.server_signature || payload.server_signature,
+                         sigs: resize_state.sigs || []
                      }
-                 });
+                 };
+                 setActiveChannel(updated);
+                 activeChannelRef.current = updated;
+
+                 // Request updated unified balance
+                 requestUnifiedBalance();
              }
              
           } catch (err) {
@@ -308,18 +464,100 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       // Handle Errors
       if (response.res && response.res[1] === 'error') {
            console.error('BROKER ERROR DETAILS:', response.res[2]);
+           const errorMsg = response.res[2];
+           if (errorMsg && errorMsg.error) {
+               if (errorMsg.error.includes('channel') && errorMsg.error.includes('not found')) {
+                   console.warn('⚠️ Channel not synced yet with broker. Wait a few seconds and try again.');
+               } else if (errorMsg.error.includes('resize already ongoing')) {
+                   console.error('⚠️ Resize operation already in progress. The previous resize needs to be completed on-chain first.');
+                   alert('A resize operation is already in progress for this channel. Please wait for it to complete or refresh the page to reset.');
+               }
+           }
       }
 
       // Handle 'cu' (Channel Update?)
       if (response.res && response.res[1] === 'cu') {
            console.log('Channel Update (cu) Received:', response.res[2]);
-           // This likely contains the new state after resize/update
-           // We can verify if balance increased here
+           const cuData = response.res[2];
+
+           // Use ref to get current channel state
+           const currentChannel = activeChannelRef.current;
+
+           // Update active channel if this is our channel
+           if (cuData && currentChannel && cuData.channel_id === currentChannel.id) {
+               console.log('Updating active channel from cu message');
+
+               // If state is provided, extract balance
+               let updatedBalance = currentChannel.balance;
+               if (cuData.state && cuData.state.allocations && address) {
+                   const userAlloc = cuData.state.allocations.find((a: any) =>
+                       a.destination.toLowerCase() === address.toLowerCase()
+                   );
+                   if (userAlloc) {
+                       updatedBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
+                   }
+               }
+
+               const newStatus = cuData.status || currentChannel.status;
+               // Channel is ready ONLY when tx is confirmed AND broker status is 'open'
+               const isReady = newStatus === 'open' && currentChannel.txConfirmed;
+
+               const updatedChannel = {
+                   ...currentChannel,
+                   status: newStatus,
+                   balance: updatedBalance,
+                   state: cuData.state || currentChannel.state,
+                   isReady: isReady
+               };
+
+               setActiveChannel(updatedChannel);
+               activeChannelRef.current = updatedChannel;
+
+               if (isReady && !currentChannel.isReady) {
+                   console.log('✅ Channel is now OPEN and ready for operations!');
+               }
+           } else if (cuData && !currentChannel) {
+               console.log('⚠️ Received cu for channel but no active channel tracked yet');
+           }
       }
 
-      // Handle 'bu' (Balance Update?)
-      if (response.res && response.res[1] === 'bu') {
-           console.log('Unified Balance Update (bu) Received:', response.res[2]);
+      // Handle 'bu' (Balance Update?), 'balances' (Balance Response), or 'ledger_balances'
+      if (response.res && (response.res[1] === 'bu' || response.res[1] === 'balances' || response.res[1] === 'ledger_balances')) {
+           console.log('Unified Balance Update Received:', response.res[1], response.res[2]);
+           const balanceData = response.res[2];
+
+           // Handle balance_updates format (from 'bu' messages)
+           if (balanceData && balanceData.balance_updates) {
+               console.log('Processing balance_updates:', balanceData.balance_updates);
+               const testBalance = balanceData.balance_updates.find((b: any) => b.asset === 'ytest.usd');
+               if (testBalance) {
+                   console.log('Found ytest.usd balance:', testBalance);
+                   // Yellow uses 8 decimals for ytest.usd (not 18)
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   setUnifiedBalance(formattedBalance);
+                   console.log('Unified Balance Updated:', formattedBalance);
+               } else {
+                   console.log('No ytest.usd balance found in balance_updates');
+               }
+           } else if (balanceData && balanceData.balances) {
+               console.log('Processing balances:', balanceData.balances);
+               // Find ytest.usd balance
+               const testBalance = balanceData.balances.find((b: any) => b.asset === 'ytest.usd');
+               if (testBalance) {
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   setUnifiedBalance(formattedBalance);
+                   console.log('Unified Balance Updated:', formattedBalance);
+               }
+           } else if (Array.isArray(balanceData)) {
+               console.log('Processing array balanceData:', balanceData);
+               // Handle array format
+               const testBalance = balanceData.find((b: any) => b.asset === 'ytest.usd');
+               if (testBalance) {
+                   const formattedBalance = (Number(testBalance.amount) / 1e8).toFixed(4);
+                   setUnifiedBalance(formattedBalance);
+                   console.log('Unified Balance Updated:', formattedBalance);
+               }
+           }
       }
 
       // Handle listing existing channels (Restoration)
@@ -335,39 +573,57 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
           }
 
           if (channelsList.length > 0) {
-              // Find first open channel
-              const openChan = channelsList.find((c: any) => c.status === 'open' || c.status === 'active'); 
-              
-              if (openChan) {
-                  const chanId = openChan.channel_id || openChan.id;
-                  console.log('Found ID of existing active channel:', chanId);
-                  
-                  let restoredBalance = 'Unknown';
-                  
-                  // Use 'amount' from summary if available (likely user balance or total capacity)
-                  // The summary doesn't have full state/allocations.
-                  if (openChan.amount) {
-                      restoredBalance = (Number(openChan.amount) / 1e18).toFixed(4);
-                  }
-                  
-                  // Check if state is present (it wasn't in the log, but keeping check)
-                  if (openChan.state && openChan.state.allocations && address) {
-                       const userAlloc = openChan.state.allocations.find((a: any) => a.destination.toLowerCase() === address.toLowerCase());
-                       if (userAlloc) {
-                           restoredBalance = (Number(userAlloc.amount) / 1e18).toFixed(4);
-                       }
-                  } else {
-                      console.log('Fetching full details not supported yet for channel:', chanId);
+              // Process all channels and calculate balances
+              const processedChannels = channelsList.map((chan: any) => {
+                  const chanId = chan.channel_id || chan.id;
+                  const chanStatus = chan.status || 'unknown';
+
+                  let channelBalance = 'Unknown';
+
+                  // Use 'amount' from summary if available
+                  if (chan.amount) {
+                      channelBalance = (Number(chan.amount) / 1e18).toFixed(8);
                   }
 
-                  setActiveChannel({
+                  // Check if state is present with allocations
+                  if (chan.state && chan.state.allocations && address) {
+                       const userAlloc = chan.state.allocations.find((a: any) =>
+                           a.destination.toLowerCase() === address.toLowerCase()
+                       );
+                       if (userAlloc) {
+                           channelBalance = (Number(userAlloc.amount) / 1e18).toFixed(8);
+                       }
+                  }
+
+                  const isReady = chanStatus === 'open';
+
+                  return {
                       id: chanId,
-                      status: openChan.status || 'Open',
-                      balance: restoredBalance,
-                      channel: openChan.channel,
-                      state: openChan.state
-                  });
+                      status: chanStatus,
+                      balance: channelBalance,
+                      channel: chan.channel,
+                      state: chan.state,
+                      isReady: isReady
+                  };
+              });
+
+              // Update all channels state
+              setAllChannels(processedChannels);
+              allChannelsRef.current = processedChannels;
+
+              console.log(`✅ Found ${processedChannels.length} channel(s)`);
+
+              // Find first open channel and set as active
+              const openChan = processedChannels.find((c: any) => c.status === 'open' || c.status === 'active');
+              if (openChan) {
+                  setActiveChannel(openChan);
+                  activeChannelRef.current = openChan;
+                  console.log('✅ Active channel set:', openChan.id);
               }
+          } else {
+              // No channels found
+              setAllChannels([]);
+              allChannelsRef.current = [];
           }
       }
 
@@ -465,18 +721,18 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
   const setupSession = async () => {
     if (!ws.current || !walletClient || !address) return;
-    
+
     // Generate Session Key
     const privKey = generatePrivateKey();
-    
+
     // Update refs
     sessionKeyRef.current = privKey;
-    
+
     const account = privateKeyToAccount(privKey);
-    
+
     // Update state for UI
     setSessionAddress(account.address);
-    
+
     console.log('Generated Session Key:', account.address);
 
     const authParams = {
@@ -485,6 +741,10 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       expires_at: BigInt(Math.floor(Date.now() / 1000) + 3600),
       scope: 'test.app',
     };
+
+    // Store authParams for later use in challenge verification
+    authParamsRef.current = authParams;
+    console.log('Stored authParams:', authParams);
 
     const authRequestMsg = await createAuthRequestMessage({
       address: address,
@@ -534,26 +794,106 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
 
 
   const fundChannel = async (amount: string) => {
-      if (!sessionKeyRef.current || !activeChannel) return;
+      if (!sessionKeyRef.current || !activeChannel) {
+          console.error('Cannot fund: session or channel missing');
+          return;
+      }
+
+      if (!activeChannel.isReady) {
+          console.error('❌ Cannot allocate: Channel is not ready yet (status: ' + activeChannel.status + ')');
+          alert('Channel is not ready yet. Please wait for on-chain confirmation.');
+          return;
+      }
+
       console.log(`Funding Channel ${activeChannel.id} with ${amount}...`);
-      
+
       const signer = createECDSAMessageSigner(sessionKeyRef.current);
-      
+
       try {
           // Convert amount to BigInt elements (assuming 18 decimals input string)
           const amountBI = BigInt(Number(amount) * 1e18);
-          
+
           const resizeMsg = await createResizeChannelMessage(
               signer,
               {
                   channel_id: activeChannel.id,
-                  allocate_amount: amountBI,
+                  allocate_amount: amountBI, // This pulls from unified balance
                   funds_destination: address as `0x${string}`, // User's address
               }
           );
           ws.current?.send(resizeMsg);
+          console.log('📤 Allocation request sent to broker');
       } catch (err) {
           console.error('Error creating resize message:', err);
+      }
+  };
+
+  const closeChannel = async (channelId: string) => {
+      if (!sessionKeyRef.current || !address) {
+          console.error('Cannot close: session or address missing');
+          return;
+      }
+
+      console.log(`🔒 Closing Channel ${channelId}...`);
+
+      const signer = createECDSAMessageSigner(sessionKeyRef.current);
+
+      try {
+          const closeMsg = await createCloseChannelMessage(
+              signer,
+              channelId,
+              address
+          );
+          ws.current?.send(closeMsg);
+          console.log('📤 Close channel request sent to broker');
+      } catch (err) {
+          console.error('Error creating close message:', err);
+      }
+  };
+
+  const closeChannel = async (channelId: string) => {
+      if (!sessionKeyRef.current || !address) {
+          console.error('Cannot close: session or address missing');
+          return;
+      }
+
+      console.log(`🔒 Closing Channel ${channelId}...`);
+
+      const signer = createECDSAMessageSigner(sessionKeyRef.current);
+
+      try {
+          const closeMsg = await createCloseChannelMessage(
+              signer,
+              channelId,
+              address
+          );
+          ws.current?.send(closeMsg);
+          console.log('📤 Close channel request sent to broker');
+      } catch (err) {
+          console.error('Error creating close message:', err);
+      }
+  };
+
+  const closeChannel = async (channelId: string) => {
+      if (!sessionKeyRef.current || !address) {
+          console.error('Cannot close: session or address missing');
+          return;
+      }
+
+      console.log(`🔒 Closing Channel ${channelId}...`);
+
+      const signer = createECDSAMessageSigner(sessionKeyRef.current);
+
+      try {
+          const closeMsg = await createCloseChannelMessage(
+              signer,
+              channelId,
+              address
+          );
+          ws.current?.send(closeMsg);
+          console.log('📤 Close channel request sent to broker');
+      } catch (err) {
+          console.error('Error creating close message:', err);
       }
   };
 
@@ -566,15 +906,51 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ userAddress: address })
           });
-          
+
           if (res.ok) {
               console.log('Faucet Request Successful');
-              alert('Faucet Funds Requested! Wait a moment then try to allocate.');
+              alert('Faucet Funds Requested! Wait a moment then refresh balance.');
+              // Request updated unified balance after brief delay
+              setTimeout(() => requestUnifiedBalance(), 2000);
           } else {
               console.error('Faucet Request Failed:', res.statusText);
           }
       } catch (err) {
           console.error('Faucet Error:', err);
+      }
+  };
+
+  const fetchAllChannels = async () => {
+      if (!sessionKeyRef.current || !ws.current) {
+          console.error('Cannot fetch channels: session or websocket missing');
+          return;
+      }
+
+      console.log('📡 Fetching all channels...');
+
+      try {
+          const signer = createECDSAMessageSigner(sessionKeyRef.current);
+          const channelsMsg = await createGetChannelsMessage(signer);
+          ws.current.send(channelsMsg);
+      } catch (err) {
+          console.error('Failed to fetch channels:', err);
+      }
+  };
+
+  const requestUnifiedBalance = async () => {
+      if (!sessionKeyRef.current || !ws.current || !address) return;
+      console.log('Requesting Unified Balance...');
+
+      try {
+          const signer = createECDSAMessageSigner(sessionKeyRef.current);
+          const ledgerMsg = await createGetLedgerBalancesMessage(
+              signer,
+              address,
+              Date.now()
+          );
+          ws.current.send(ledgerMsg);
+      } catch (err) {
+          console.error('Failed to create ledger balance message:', err);
       }
   };
 
@@ -584,7 +960,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       // 1. Fetch Native ETH Balance
       const ethBalance = await publicClient.getBalance({ address });
       const ethFormatted = (Number(ethBalance) / 1e18).toFixed(4);
-      
+
       // 2. Fetch Active Token Balance
       let tokenBalance = '0.00';
       let tokenAddr = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'; // Default
@@ -607,7 +983,7 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
             functionName: 'balanceOf',
             args: [address]
           }) as bigint;
-          
+
           console.log('Raw Token Balance:', erc20Balance);
           tokenBalance = (Number(erc20Balance) / 1e18).toFixed(2);
       } catch (err) {
@@ -615,7 +991,10 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       }
 
       setBalance(`${ethFormatted} ETH | ${tokenBalance} TEST`);
-      
+
+      // 3. Request Unified Balance from Broker
+      requestUnifiedBalance();
+
     } catch (e) {
       console.error('Error fetching balance', e);
     }
@@ -627,17 +1006,21 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       isConnected: !!client,
       initialize,
       balance,
+      unifiedBalance,
       refreshBalance,
-      
+
       brokerConnected,
       supportedNetworks,
       sessionAddress,
       activeChannel, // Added
+      allChannels, // Added
       setupSession,
       openChannel,
       fundChannel,
+      closeChannel,
       requestFaucet,
-      listNetworks
+      listNetworks,
+      fetchAllChannels
     }}>
       {children}
     </YellowContext.Provider>

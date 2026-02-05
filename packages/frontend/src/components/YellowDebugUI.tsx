@@ -5,11 +5,12 @@ import { Button } from "./ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "./ui/card";
 
 export function YellowDebugUI() {
-  const { 
-    isConnected: isYellowConnected, 
-    initialize, 
-    balance, 
-    refreshBalance, 
+  const {
+    isConnected: isYellowConnected,
+    initialize,
+    balance,
+    unifiedBalance,
+    refreshBalance,
     client,
     brokerConnected,
     supportedNetworks,
@@ -17,9 +18,12 @@ export function YellowDebugUI() {
     setupSession,
     openChannel,
     fundChannel,
+    closeChannel,
     requestFaucet,
     listNetworks,
-    activeChannel
+    activeChannel,
+    allChannels,
+    fetchAllChannels
   } = useYellow();
   
   const { isConnected: isWalletConnected } = useAccount();
@@ -57,7 +61,7 @@ export function YellowDebugUI() {
       </CardHeader>
       <CardContent className="space-y-4">
         {!isYellowConnected ? (
-          <Button onClick={handleInit} disabled={loading} className="w-full">
+          <Button onClick={handleInit} disabled={loading} className="w-full text-white">
             {loading ? 'Initializing...' : 'Initialize Yellow SDK'}
           </Button>
         ) : (
@@ -68,10 +72,14 @@ export function YellowDebugUI() {
                 <span className="font-mono">{client?.chainId}</span>
               </div>
               <div className="flex justify-between text-xs">
-                 <span className="text-muted-foreground">Balance:</span>
-                 <span>{balance}</span>
+                 <span className="text-muted-foreground">Wallet:</span>
+                 <span className="font-mono text-[10px]">{balance}</span>
               </div>
-              <Button variant="outline" size="sm" onClick={() => refreshBalance()} className="w-full h-8">
+              <div className="flex justify-between text-xs">
+                 <span className="text-muted-foreground">Unified:</span>
+                 <span className="font-mono font-semibold text-yellow-500">{unifiedBalance} TEST</span>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => refreshBalance()} className="w-full h-8 text-white">
                 Refresh Balance
               </Button>
             </div>
@@ -80,11 +88,11 @@ export function YellowDebugUI() {
             <div className="space-y-2">
                 <h4 className="text-sm font-semibold">Broker Actions</h4>
                 
-                <Button variant="secondary" size="sm" onClick={listNetworks} className="w-full h-8">
+                <Button variant="secondary" size="sm" onClick={listNetworks} className="w-full h-8 text-white">
                     List Networks (Console)
                 </Button>
-                
-                <Button variant="outline" size="sm" onClick={requestFaucet} disabled={!isWalletConnected} className="w-full h-8">
+
+                <Button variant="outline" size="sm" onClick={requestFaucet} disabled={!isWalletConnected} className="w-full h-8 text-white">
                     Request Faucet Funds
                 </Button>
                 {supportedNetworks.length > 0 && (
@@ -95,7 +103,7 @@ export function YellowDebugUI() {
                     </div>
                 )}
 
-                <Button variant="secondary" size="sm" onClick={setupSession} disabled={!!sessionAddress} className="w-full h-8">
+                <Button variant="secondary" size="sm" onClick={setupSession} disabled={!!sessionAddress} className="w-full h-8 text-white">
                     {sessionAddress ? 'Session Active' : 'Setup Session'}
                 </Button>
                 {sessionAddress && (
@@ -104,25 +112,66 @@ export function YellowDebugUI() {
                      </div>
                 )}
 
-                <Button variant="default" size="sm" onClick={openChannel} disabled={!sessionAddress || !!activeChannel} className="w-full h-8">
-                    {activeChannel ? 'Channel Open' : 'Open Channel'}
+                <Button variant="default" size="sm" onClick={openChannel} disabled={!sessionAddress} className="w-full h-8 text-white">
+                    Open New Channel
                 </Button>
-                
-                {activeChannel && (
-                    <div className="text-xs bg-muted p-2 rounded space-y-1">
-                        <div className="font-semibold text-green-500">✓ Active Channel</div>
-                        <div className="truncate text-[10px]" title={activeChannel.id}>ID: {activeChannel.id}</div>
-                        <div>Status: {activeChannel.status}</div>
-                        <div>Balance: {activeChannel.balance}</div>
-                        
-                        <Button 
-                            variant="secondary" 
-                            size="sm" 
-                            onClick={() => fundChannel('0.00001')} 
-                            className="w-full h-6 mt-2 text-[10px]"
-                        >
-                            Alloc 0.00001 TEST From Faucet
-                        </Button>
+
+                {sessionAddress && (
+                    <Button variant="outline" size="sm" onClick={fetchAllChannels} className="w-full h-8 text-white">
+                        Refresh Channels
+                    </Button>
+                )}
+
+                {/* Display All Channels */}
+                {allChannels.length > 0 && (
+                    <div className="space-y-2">
+                        <h4 className="text-sm font-semibold text-yellow-400 mt-2">
+                            Open Channels ({allChannels.length})
+                        </h4>
+                        <div className="max-h-60 overflow-y-auto space-y-2">
+                            {allChannels.map((channel) => (
+                                <div key={channel.id} className="text-xs bg-muted p-2 rounded space-y-1 border border-gray-700">
+                                    <div className={`font-semibold ${channel.isReady ? 'text-green-500' : 'text-yellow-500'}`}>
+                                        {channel.isReady ? '✅ Ready' : '⏳ Pending'}
+                                    </div>
+                                    <div className="truncate text-[10px]" title={channel.id}>ID: {channel.id}</div>
+                                    <div>Status: <span className="font-semibold">{channel.status}</span></div>
+                                    <div className="font-semibold text-green-400">Balance: {channel.balance} TEST</div>
+                                    {!channel.isReady && (
+                                        <div className="text-[9px] text-yellow-600 italic mt-1">
+                                            ⏳ Waiting for on-chain confirmation...
+                                        </div>
+                                    )}
+
+                                    <div className="flex gap-1">
+                                        <Button
+                                            variant="secondary"
+                                            size="sm"
+                                            onClick={() => fundChannel('0.1')}
+                                            disabled={!channel.isReady}
+                                            className="flex-1 h-6 mt-2 text-[10px] text-white"
+                                        >
+                                            {channel.isReady ? 'Alloc 0.1 TEST' : 'Waiting...'}
+                                        </Button>
+                                        <Button
+                                            variant="destructive"
+                                            size="sm"
+                                            onClick={() => closeChannel(channel.id)}
+                                            disabled={!channel.isReady}
+                                            className="flex-1 h-6 mt-2 text-[10px] text-white"
+                                        >
+                                            Close Channel
+                                        </Button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {allChannels.length === 0 && sessionAddress && (
+                    <div className="text-xs text-muted-foreground italic mt-2">
+                        No channels found. Open a new channel to get started.
                     </div>
                 )}
             </div>
