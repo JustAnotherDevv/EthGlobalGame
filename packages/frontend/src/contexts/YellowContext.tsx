@@ -105,6 +105,12 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
   const [allChannels, setAllChannels] = useState<any[]>([]);
   const allChannelsRef = useRef<any[]>([]); // Ref to avoid stale closure
 
+    const refreshAfterWithdrawal = async () => {
+        await refreshBalance();
+        // Unified balance might have changed too
+        setTimeout(() => requestUnifiedBalance(), 1000);
+    };
+
   useEffect(() => {
     if (!isWalletConnected || !walletClient) {
       setClient(null);
@@ -140,9 +146,6 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       socket.onmessage = handleBrokerMessage;
 
       ws.current = socket;
-
-      // Note: Yellow Network broker doesn't require ping/keepalive messages
-      // The WebSocket connection stays alive automatically
     });
   };
 
@@ -484,16 +487,61 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       }
 
       // Handle close_channel response
-      if (response.res && response.res[1] === 'close_channel') {
-          const closeData = response.res[2];
-          console.log('✅ Channel close initiated:', closeData);
+        if (response.res && response.res[1] === 'close_channel') {
+            const { channel_id, state, server_signature } = response.res[2];
+            console.log('✅ Channel close prepared:', channel_id);
 
-          // Refresh unified balance after a brief delay
-          setTimeout(() => {
-              requestUnifiedBalance();
-              fetchAllChannels();
-          }, 1000);
-      }
+            const client = clientRef.current;
+            if (!client) {
+                console.error('Client not initialized');
+                return;
+            }
+
+            // Submit close to blockchain
+            try {
+                console.log('Submitting close to chain...');
+
+                const txHash = await client.closeChannel({
+                    finalState: {
+                        intent: state.intent,
+                        version: BigInt(state.version),
+                        data: state.state_data || state.data || '0x',
+                        allocations: state.allocations.map((a: any) => ({
+                            destination: a.destination,
+                            token: a.token,
+                            amount: BigInt(a.amount),
+                        })),
+                        channelId: channel_id,
+                        serverSignature: server_signature,
+                    },
+                    stateData: state.state_data || state.data || '0x',
+                });
+
+                console.log('✅ Channel closed on-chain:', txHash);
+                alert(`Channel closed! Transaction: ${txHash}`);
+
+                // Update channel status immediately
+                if (activeChannelRef.current?.id === channel_id) {
+                    setActiveChannel(null);
+                    activeChannelRef.current = null;
+                }
+
+                // Remove from allChannels
+                const updatedChannels = allChannelsRef.current.filter(c => c.id !== channel_id);
+                setAllChannels(updatedChannels);
+                allChannelsRef.current = updatedChannels;
+
+                // Refresh unified balance
+                setTimeout(() => {
+                    requestUnifiedBalance();
+                    fetchAllChannels();
+                }, 2000);
+
+            } catch (err) {
+                console.error('Failed to close channel on-chain:', err);
+                alert(`Close failed: ${err}`);
+            }
+        }
 
       // Handle Errors
       if (response.res && response.res[1] === 'error') {
@@ -932,28 +980,28 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       }
   };
 
-  const closeChannel = async (channelId: string) => {
-      if (!sessionKeyRef.current || !address) {
-          console.error('Cannot close: session or address missing');
-          return;
-      }
+    const closeChannel = async (channelId: string) => {
+        if (!sessionKeyRef.current || !address) {
+            console.error('Cannot close: session or address missing');
+            return;
+        }
 
-      console.log(`🔒 Closing Channel ${channelId}...`);
+        console.log(`🔒 Closing Channel ${channelId}...`);
 
-      const signer = createECDSAMessageSigner(sessionKeyRef.current);
+        const signer = createECDSAMessageSigner(sessionKeyRef.current);
 
-      try {
-          const closeMsg = await createCloseChannelMessage(
-              signer,
-              channelId,
-              address
-          );
-          ws.current?.send(closeMsg);
-          console.log('📤 Close channel request sent to broker');
-      } catch (err) {
-          console.error('Error creating close message:', err);
-      }
-  };
+        try {
+            const closeMsg = await createCloseChannelMessage(
+                signer,
+                channelId as `0x${string}`, // CAST to 0x${string}
+                address
+            );
+            ws.current?.send(closeMsg);
+            console.log('📤 Close channel request sent to broker');
+        } catch (err) {
+            console.error('Error creating close message:', err);
+        }
+    };
 
   const withdrawFromUnified = async (amount: string) => {
       if (!clientRef.current || !address) {
@@ -1072,51 +1120,78 @@ export const YellowProvider = ({ children }: { children: ReactNode }) => {
       }
   };
 
-  const refreshBalance = async () => {
-    if (!walletClient || !address || !publicClient) return;
-    try {
-      // 1. Fetch Native ETH Balance
-      const ethBalance = await publicClient.getBalance({ address });
-      const ethFormatted = (Number(ethBalance) / 1e18).toFixed(4);
+    const refreshBalance = async () => {
+        if (!walletClient || !address || !publicClient) return;
+        try {
+            // 1. Fetch Native ETH Balance
+            const ethBalance = await publicClient.getBalance({ address });
+            const ethFormatted = (Number(ethBalance) / 1e18).toFixed(4);
 
-      // 2. Fetch Active Token Balance
-      let tokenBalance = '0.00';
-      let tokenAddr = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'; // Default
-      const asset = supportedAssets.find((a: any) => a.chain_id === 11155111);
-      if (asset && asset.token) {
-          tokenAddr = asset.token;
-      }
+            // 2. Fetch TEST token balance from YELLOW CUSTODY CONTRACT, not token contract
+            let custodyBalance = '0.00';
+            const tokenAddr = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
 
-      try {
-          console.log('Fetching token balance for:', tokenAddr);
-          const erc20Balance = await publicClient.readContract({
-            address: tokenAddr as `0x${string}`,
-            abi: [{
-                name: 'balanceOf',
-                type: 'function',
-                inputs: [{ name: 'account', type: 'address' }],
-                outputs: [{ name: 'balance', type: 'uint256' }],
-                stateMutability: 'view'
-            }],
-            functionName: 'balanceOf',
-            args: [address]
-          }) as bigint;
+            try {
+                console.log('Fetching custody balance for token:', tokenAddr);
 
-          console.log('Raw Token Balance:', erc20Balance);
-          tokenBalance = (Number(erc20Balance) / 1e18).toFixed(2);
-      } catch (err) {
-          console.warn('Failed to fetch token balance:', err);
-      }
+                // Check custody contract balance (where withdrawn funds go)
+                const custodyBal = await publicClient.readContract({
+                    address: YELLOW_ADDRESSES.custody, // 0x019B65A265EB3363822f2752141b3dF16131b262
+                    abi: [{
+                        type: 'function',
+                        name: 'getAccountsBalances',
+                        inputs: [
+                            { name: 'users', type: 'address[]' },
+                            { name: 'tokens', type: 'address[]' }
+                        ],
+                        outputs: [{ type: 'uint256[]' }],
+                        stateMutability: 'view'
+                    }],
+                    functionName: 'getAccountsBalances',
+                    args: [[address], [tokenAddr as `0x${string}`]]
+                }) as bigint[];
 
-      setBalance(`${ethFormatted} ETH | ${tokenBalance} TEST`);
+                console.log('Raw Custody Balance:', custodyBal);
 
-      // 3. Request Unified Balance from Broker
-      requestUnifiedBalance();
+                // Yellow uses 6 decimals for ytest.USD (as shown in MetaMask)
+                custodyBalance = (Number(custodyBal[0]) / 1e6).toFixed(6);
+                console.log('Formatted Custody Balance:', custodyBalance, 'TEST');
 
-    } catch (e) {
-      console.error('Error fetching balance', e);
-    }
-  };
+                // Optional: Also check direct token contract balance for completeness
+                try {
+                    const tokenContractBalance = await publicClient.readContract({
+                        address: tokenAddr as `0x${string}`,
+                        abi: [{
+                            name: 'balanceOf',
+                            type: 'function',
+                            inputs: [{ name: 'account', type: 'address' }],
+                            outputs: [{ name: 'balance', type: 'uint256' }],
+                            stateMutability: 'view'
+                        }],
+                        functionName: 'balanceOf',
+                        args: [address]
+                    }) as bigint;
+
+                    console.log('Direct Token Contract Balance:',
+                        (Number(tokenContractBalance) / 1e6).toFixed(6), 'TEST');
+                } catch (tokenErr) {
+                    console.warn('Could not fetch direct token balance:', tokenErr);
+                }
+
+            } catch (err) {
+                console.warn('Failed to fetch custody balance:', err);
+            }
+
+            // Combine ETH + Custody Balance
+            setBalance(`${ethFormatted} ETH | ${custodyBalance} TEST`);
+
+            // 3. Request Unified Balance from Broker (off-chain)
+            requestUnifiedBalance();
+
+        } catch (e) {
+            console.error('Error fetching balance', e);
+        }
+    };
 
   return (
     <YellowContext.Provider value={{
