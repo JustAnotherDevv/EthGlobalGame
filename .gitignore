@@ -56,3 +56,4 @@ packages/backend/yarn.lock
 package-lock.json
 
 CLAUDE.md
+.claude
