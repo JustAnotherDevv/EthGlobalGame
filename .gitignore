@@ -54,3 +54,5 @@ packages/backend/tsconfig.tsbuildinfo
 packages/backend/yarn.lock
 
 package-lock.json
+
+CLAUDE.md
