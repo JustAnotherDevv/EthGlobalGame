@@ -9,10 +9,10 @@ This is a monorepo with two packages:
 ```
 ethglobal-hackmoney/
 ├── packages/
-│   ├── frontend/         
-│   └── backend/          
-├── package.json           
-└── tsconfig.json          
+│   ├── frontend/
+│   └── backend/
+├── package.json
+└── tsconfig.json
 ```
 
 ## Getting Started
@@ -25,7 +25,6 @@ ethglobal-hackmoney/
 ### Installation
 
 Install all dependencies for both packages:
-
 
 ### Development
 
@@ -41,7 +40,7 @@ curl -XPOST https://clearnet-sandbox.yellow.com/faucet/requestTokens \
 
 Run both frontend and backend concurrently:
 
-```bash
+````bash
 npm run dev
 - **Frontend** on http://localhost:5173 (Vite dev server)
 - **Backend** on http://localhost:3001 (Express server)
@@ -51,7 +50,7 @@ Or run them individually:
 ```bash
 npm run dev:frontend  # Frontend only
 npm run dev:backend   # Backend only
-```
+````
 
 ### Building
 
@@ -70,5 +69,4 @@ npm run build:backend
 
 ## Tech Stack
 
-todo
-
+Yellow State Channels - backbone of entire game, all state transitions, player movement, resource collectin and wagers go through them.

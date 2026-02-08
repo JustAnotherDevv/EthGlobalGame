@@ -9,6 +9,7 @@ import { config } from './config/wagmi'
 import '@rainbow-me/rainbowkit/styles.css'
 
 import { YellowProvider } from './contexts/YellowContext'
+import { GameProvider } from './contexts/GameContext'
 
 const queryClient = new QueryClient()
 
@@ -18,7 +19,9 @@ createRoot(document.getElementById('root')!).render(
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
           <YellowProvider>
-            <App />
+            <GameProvider>
+              <App />
+            </GameProvider>
           </YellowProvider>
         </RainbowKitProvider>
       </QueryClientProvider>

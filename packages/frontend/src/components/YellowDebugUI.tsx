@@ -1,208 +1,123 @@
 import { useYellow } from "@/contexts/YellowContext";
+import { useGame } from "@/contexts/GameContext";
 import { useAccount } from "wagmi";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "./ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "./ui/card";
+import * as THREE from "three";
 
-export function YellowDebugUI() {
-  const {
-    isConnected: isYellowConnected,
-    initialize,
-    balance,
-    unifiedBalance,
-    refreshBalance,
-    client,
-    brokerConnected,
-    supportedNetworks,
-    sessionAddress,
-    setupSession,
-    openChannel,
-    fundChannel,
-    closeChannel,
-    withdrawFromUnified,
-    requestFaucet,
-    listNetworks,
-    activeChannel,
-    allChannels,
-    fetchAllChannels
-  } = useYellow();
+const BASE_SPEED = 4;
+const BASE_RUN_SPEED = 6;
+const BASE_DIG_MS = 3000;
 
+interface Props {
+  playerRef?: React.RefObject<THREE.Group | null>;
+}
+
+export function YellowDebugUI({ playerRef }: Props) {
+  const { connect, isReady, isConnecting, balance, refreshBalance, requestFaucet } = useYellow();
   const { isConnected: isWalletConnected } = useAccount();
+  const { upgrades, phase } = useGame();
   const [loading, setLoading] = useState(false);
-  const [withdrawAmount, setWithdrawAmount] = useState('0.1');
+  const [fps, setFps] = useState(0);
+  const [pos, setPos] = useState({ x: 0, y: 0, z: 0 });
+  const fpsFrames = useRef(0);
+  const fpsLastTime = useRef(performance.now());
 
-  const handleInit = async () => {
+  useEffect(() => {
+    if (!playerRef) return;
+    let rafId: number;
+    const update = () => {
+      const now = performance.now();
+      fpsFrames.current++;
+      if (now >= fpsLastTime.current + 1000) {
+        setFps(Math.round((fpsFrames.current * 1000) / (now - fpsLastTime.current)));
+        fpsLastTime.current = now;
+        fpsFrames.current = 0;
+      }
+      if (playerRef.current) {
+        const p = playerRef.current.position;
+        setPos({ x: +p.x.toFixed(1), y: +p.y.toFixed(1), z: +p.z.toFixed(1) });
+      }
+      rafId = requestAnimationFrame(update);
+    };
+    rafId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(rafId);
+  }, [playerRef]);
+
+  const handleConnect = async () => {
     setLoading(true);
-    await initialize();
+    try { await connect(); } catch (e) { console.error('Yellow connect failed:', e); }
     setLoading(false);
   };
 
   if (!isWalletConnected) {
     return (
-      <Card className="fixed bottom-4 right-4 w-80">
-        <CardHeader>
-          <CardTitle>Yellow Network</CardTitle>
-        </CardHeader>
+      <Card className="fixed bottom-4 right-4 w-72">
+        <CardHeader><CardTitle>Yellow Network</CardTitle></CardHeader>
         <CardContent>
-          <p className="text-sm text-yellow-600">Please connect wallet first</p>
+          <p className="text-sm text-yellow-600">Connect wallet first</p>
         </CardContent>
       </Card>
     );
   }
 
+  const walkSpeed = (BASE_SPEED * upgrades.speedMultiplier).toFixed(1);
+  const runSpeed = (BASE_RUN_SPEED * upgrades.speedMultiplier).toFixed(1);
+  const digSpeed = (BASE_DIG_MS * upgrades.digMultiplier / 1000).toFixed(1);
+  const isPlaying = phase === 'playing' || phase === 'ended';
+
   return (
-    <Card className="fixed bottom-4 right-4 w-96 max-h-[80vh] overflow-y-auto bg-background/90 backdrop-blur z-50">
-      <CardHeader>
-        <CardTitle className="flex justify-between items-center">
-          <span>Yellow Network</span>
-          <div className="flex gap-2">
-             <span title="Broker" className={`h-2 w-2 rounded-full ${brokerConnected ? 'bg-blue-500' : 'bg-gray-500'}`} />
-             <span title="Client" className={`h-2 w-2 rounded-full ${isYellowConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-          </div>
+    <Card className="fixed bottom-4 right-4 w-72 bg-background/90 backdrop-blur z-50">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex justify-between items-center text-sm">
+          <span>Debug</span>
+          <span className={`h-2 w-2 rounded-full ${isReady ? 'bg-green-500' : isConnecting ? 'bg-yellow-500' : 'bg-red-500'}`} />
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {!isYellowConnected ? (
-          <Button onClick={handleInit} disabled={loading} className="w-full text-white">
-            {loading ? 'Initializing...' : 'Initialize Yellow SDK'}
+      <CardContent className="space-y-2 text-xs font-mono">
+        {isPlaying && playerRef && (
+          <div className="space-y-1 border-b pb-2">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">FPS:</span>
+              <span className={fps < 30 ? "text-red-500" : "text-green-500"}>{fps}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Pos:</span>
+              <span>{pos.x}, {pos.y}, {pos.z}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Walk/Run:</span>
+              <span>{walkSpeed} / {runSpeed}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Dig time:</span>
+              <span>{digSpeed}s</span>
+            </div>
+          </div>
+        )}
+
+        {!isReady ? (
+          <Button onClick={handleConnect} disabled={loading || isConnecting} className="w-full text-white">
+            {isConnecting ? 'Connecting...' : 'Connect Yellow'}
           </Button>
         ) : (
-          <div className="space-y-4">
-            <div className="space-y-2 border-b pb-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-muted-foreground">Chain ID:</span>
-                <span className="font-mono">{client?.chainId}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                 <span className="text-muted-foreground">Wallet:</span>
-                 <span className="font-mono text-[10px]">{balance}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                 <span className="text-muted-foreground" title="Off-chain balance in Yellow clearing layer">Unified:</span>
-                 <span className="font-mono font-semibold text-yellow-500">{unifiedBalance} TEST</span>
-              </div>
-
-              {/* Withdraw from Unified Balance */}
-              {parseFloat(unifiedBalance) > 0 && (
-                <div className="space-y-1 pt-2 border-t">
-                  <div className="flex gap-1">
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0.001"
-                      value={withdrawAmount}
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
-                      className="flex-1 h-7 px-2 text-xs rounded bg-muted border border-gray-600"
-                      placeholder="Amount"
-                    />
-                    <Button
-                      variant="default"
-                      size="sm"
-                      onClick={() => withdrawFromUnified(withdrawAmount)}
-                      disabled={!withdrawAmount || parseFloat(withdrawAmount) <= 0 || parseFloat(withdrawAmount) > parseFloat(unifiedBalance)}
-                      className="h-7 text-[10px] text-white"
-                    >
-                      Withdraw to Sepolia
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              <Button variant="outline" size="sm" onClick={() => refreshBalance()} className="w-full h-8 text-white">
-                Refresh Balance
-              </Button>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Status:</span>
+              <span className="text-green-500 font-semibold">Ready</span>
             </div>
-
-            {/* Broker Actions */}
-            <div className="space-y-2">
-                <h4 className="text-sm font-semibold">Broker Actions</h4>
-                
-                <Button variant="secondary" size="sm" onClick={listNetworks} className="w-full h-8 text-white">
-                    List Networks (Console)
-                </Button>
-
-                <Button variant="outline" size="sm" onClick={requestFaucet} disabled={!isWalletConnected} className="w-full h-8 text-white">
-                    Request Faucet Funds
-                </Button>
-                {supportedNetworks.length > 0 && (
-                    <div className="text-xs max-h-20 overflow-auto bg-muted p-2 rounded">
-                        {supportedNetworks.map((n: any) => (
-                            <div key={n.chain_id}>ID: {n.chain_id} - {n.name}</div>
-                        ))}
-                    </div>
-                )}
-
-                <Button variant="secondary" size="sm" onClick={setupSession} disabled={!!sessionAddress} className="w-full h-8 text-white">
-                    {sessionAddress ? 'Session Active' : 'Setup Session'}
-                </Button>
-                {sessionAddress && (
-                     <div className="text-xs truncate text-muted-foreground">
-                        Session: {sessionAddress}
-                     </div>
-                )}
-
-                <Button variant="default" size="sm" onClick={openChannel} disabled={!sessionAddress} className="w-full h-8 text-white">
-                    Open New Channel
-                </Button>
-
-                {sessionAddress && (
-                    <Button variant="outline" size="sm" onClick={fetchAllChannels} className="w-full h-8 text-white">
-                        Refresh Channels
-                    </Button>
-                )}
-
-                {/* Display All Channels */}
-                {allChannels.length > 0 && (
-                    <div className="space-y-2">
-                        <h4 className="text-sm font-semibold text-yellow-400 mt-2">
-                            Open Channels ({allChannels.length})
-                        </h4>
-                        <div className="max-h-60 overflow-y-auto space-y-2">
-                            {allChannels.map((channel) => (
-                                <div key={channel.id} className="text-xs bg-muted p-2 rounded space-y-1 border border-gray-700">
-                                    <div className={`font-semibold ${channel.isReady ? 'text-green-500' : 'text-yellow-500'}`}>
-                                        {channel.isReady ? '✅ Ready' : '⏳ Pending'}
-                                    </div>
-                                    <div className="truncate text-[10px]" title={channel.id}>ID: {channel.id}</div>
-                                    <div>Status: <span className="font-semibold">{channel.status}</span></div>
-                                    <div className="font-semibold text-green-400">Balance: {channel.balance} TEST</div>
-                                    {!channel.isReady && (
-                                        <div className="text-[9px] text-yellow-600 italic mt-1">
-                                            ⏳ Waiting for on-chain confirmation...
-                                        </div>
-                                    )}
-
-                                    <div className="flex gap-1">
-                                        <Button
-                                            variant="secondary"
-                                            size="sm"
-                                            onClick={() => fundChannel('0.1', channel.id)}
-                                            disabled={!channel.isReady}
-                                            className="flex-1 h-6 mt-2 text-[10px] text-white"
-                                        >
-                                            {channel.isReady ? 'Alloc 0.1 TEST' : 'Waiting...'}
-                                        </Button>
-                                        <Button
-                                            variant="destructive"
-                                            size="sm"
-                                            onClick={() => closeChannel(channel.id)}
-                                            disabled={!channel.isReady}
-                                            className="flex-1 h-6 mt-2 text-[10px] text-white"
-                                        >
-                                            Close Channel
-                                        </Button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                {allChannels.length === 0 && sessionAddress && (
-                    <div className="text-xs text-muted-foreground italic mt-2">
-                        No channels found. Open a new channel to get started.
-                    </div>
-                )}
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Balance:</span>
+              <span>{balance.toFixed(8)} TEST</span>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={refreshBalance} className="flex-1 h-7 text-white text-xs">
+                Refresh
+              </Button>
+              <Button variant="outline" size="sm" onClick={requestFaucet} className="flex-1 h-7 text-white text-xs">
+                Faucet
+              </Button>
             </div>
           </div>
         )}

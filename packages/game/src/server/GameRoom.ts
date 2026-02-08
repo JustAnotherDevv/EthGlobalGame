@@ -145,6 +145,8 @@ export class GameRoom {
     this.phase = RoomPhase.Playing;
     this.resources = generateResources(this.seed);
 
+    console.log(`[Game ${this.id}] Started | seed=${this.seed} | chest=(${this.chestPosition.x.toFixed(1)}, ${this.chestPosition.z.toFixed(1)})`);
+
     this.broadcast({
       type: ServerMsgType.GameStarted,
       seed: this.seed,

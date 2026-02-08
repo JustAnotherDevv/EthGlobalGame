@@ -1,4 +1,4 @@
-export const GRID_SIZE = 400;
+export const GRID_SIZE = 200;
 export const HARVEST_DURATION_MS = parseInt(process.env.HARVEST_DURATION_MS || '3000', 10);
 export const DIG_DURATION_MS = parseInt(process.env.DIG_DURATION_MS || '3000', 10);
 export const CHEST_FIND_RADIUS = parseFloat(process.env.CHEST_FIND_RADIUS || '2.0');

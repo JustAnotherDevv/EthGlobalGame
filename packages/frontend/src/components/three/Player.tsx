@@ -17,7 +17,7 @@ const smoothedHorizontalRotation = { current: 0 }
 // const smoothedLookAtY = { current: 0 }
 const smoothedLookAtPosition = new THREE.Vector3() // Smooth lookAt target to prevent tilting
 
-export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing' }>(({ gameState }, ref) => {
+export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'; onAction?: (x: number, y: number, z: number) => void }>(({ gameState, onAction }, ref) => {
   const smoothedY = useRef(0)
   // const smoothedCameraY = useRef(0)
   const stableGroundY = useRef(0) // Track stable ground height when grounded
@@ -189,7 +189,11 @@ export const Player = forwardRef<THREE.Group, { gameState: 'preview' | 'playing'
     if (nextAnimation !== animation) {
         setAnimation(nextAnimation)
     }
-    
+
+    if (action && onAction) {
+        onAction(translation.x, translation.y, translation.z)
+    }
+
     // rbVelocity already declared above
     // const rbVelocity = rb.current.linvel()
 

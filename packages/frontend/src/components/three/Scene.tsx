@@ -1,10 +1,12 @@
-import { useMemo, useRef, useState } from "react"
+import { useMemo, useRef, useState, memo } from "react"
 import { Canvas, useFrame } from "@react-three/fiber"
-import { KeyboardControls, Sky, Stars, ContactShadows, PointerLockControls, Environment } from "@react-three/drei"
-import { Physics, RigidBody } from "@react-three/rapier"
+import { KeyboardControls, Sky, Stars, PointerLockControls, Environment } from "@react-three/drei"
+import { Physics, RigidBody, CuboidCollider } from "@react-three/rapier"
 import * as THREE from "three"
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { Player } from "./Player"
+import { MultiplayerLayer } from "./MultiplayerLayer"
+import { digSpotsArray, digSpotsCount } from "@/lib/digSpotsStore"
 
 // Simple pseudo-random generator based on seed
 function mulberry32(a: number) {
@@ -788,11 +790,8 @@ function WaterObjects({ seed }: { seed: number }) {
 
 function Crabs({ seed }: { seed: number }) {
   const dummy = useMemo(() => new THREE.Object3D(), [])
-  const geometry = useMemo(() => {
-    const geo = new THREE.BoxGeometry(0.3, 0.1, 0.2)
-    return geo
-  }, [])
-  const material = useMemo(() => new THREE.MeshStandardMaterial({ color: "#ff4500", roughness: 0.5 }), [])
+  const geometry = useMemo(() => new THREE.BoxGeometry(0.3, 0.1, 0.2), [])
+  const crabMaterialRef = useRef<THREE.ShaderMaterial>(null)
 
   const crabs = useMemo(() => {
     const random = mulberry32(seed * 666)
@@ -807,29 +806,54 @@ function Crabs({ seed }: { seed: number }) {
       const z = r * Math.sin(theta)
       const islandVal = getIslandShape(x, z, seed, false, true) as number
       if (islandVal > 0.08 || islandVal < 0.02) continue
-      data.push({ x, z, rot: random() * Math.PI * 2, phase: random() * Math.PI * 2 })
+      data.push({ x, z, rot: random() * Math.PI * 2 })
       i++
     }
     return data
   }, [seed])
 
-  const meshRef = useRef<THREE.InstancedMesh>(null)
+  const crabShader = useMemo(() => ({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      uniform float uTime;
+      void main() {
+        vec4 ip = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float phase = ip.x * 3.17 + ip.z * 7.13;
+        float move = sin(uTime * 2.0 + phase) * 0.2;
+        vec3 pos = position;
+        pos += vec3(move * 0.5, 0.0, move * 0.5);
+        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(pos, 1.0);
+      }
+    `,
+    fragmentShader: `
+      void main() {
+        gl_FragColor = vec4(1.0, 0.27, 0.0, 1.0);
+      }
+    `,
+  }), [])
+
+  const setInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    crabs.forEach((c, i) => {
+      dummy.position.set(c.x, -0.6, c.z)
+      dummy.rotation.set(0, c.rot, 0)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    })
+    mesh.instanceMatrix.needsUpdate = true
+  }
 
   useFrame((state) => {
-    const time = state.clock.elapsedTime
-    if (meshRef.current) {
-      crabs.forEach((c, i) => {
-        const move = Math.sin(time * 2 + c.phase) * 0.2
-        dummy.position.set(c.x + Math.cos(c.rot) * move, -0.6, c.z + Math.sin(c.rot) * move)
-        dummy.rotation.set(0, c.rot, 0)
-        dummy.updateMatrix()
-        meshRef.current!.setMatrixAt(i, dummy.matrix)
-      })
-      meshRef.current.instanceMatrix.needsUpdate = true
+    if (crabMaterialRef.current) {
+      crabMaterialRef.current.uniforms.uTime.value = state.clock.elapsedTime
     }
   })
 
-  return <instancedMesh ref={meshRef} args={[geometry, material, crabs.length]} castShadow />
+  return (
+    <instancedMesh ref={setInstances} args={[geometry, undefined, crabs.length]} castShadow>
+      <shaderMaterial ref={crabMaterialRef} args={[crabShader]} />
+    </instancedMesh>
+  )
 }
 
 function AncientTotems({ seed }: { seed: number }) {
@@ -957,79 +981,81 @@ function Torches({ seed }: { seed: number }) {
 }
 
 function AtmosphericEffects({ seed, gameState }: { seed: number, gameState: 'preview' | 'playing' }) {
-  const dummy = useMemo(() => new THREE.Object3D(), [])
-  const leafGeo = useMemo(() => new THREE.PlaneGeometry(0.1, 0.1), [])
-  const leafMat = useMemo(() => new THREE.MeshStandardMaterial({ 
-    color: "#2d5a27", 
-    side: THREE.DoubleSide, 
-    alphaTest: 0.5,
-    transparent: false,
-    depthWrite: true,
-    depthTest: true
-  }), [])
-  
-  const particleCount = gameState === 'preview' ? 400 : 800
-  const particles = useMemo(() => {
-    const random = mulberry32(seed * 123)
-    const data: { x: number, y: number, z: number, speed: number, rotSpeed: number, phase: number }[] = []
-    for (let i = 0; i < particleCount; i++) {
-      data.push({
-        x: (random() - 0.5) * GRASS_RANGE,
-        y: 5 + random() * 10,
-        z: (random() - 0.5) * GRASS_RANGE,
-        speed: 0.5 + random() * 1,
-        rotSpeed: random() * 2,
-        phase: random() * Math.PI * 2
-      })
-    }
-    return data
-  }, [seed, particleCount])
+  const materialRef = useRef<THREE.ShaderMaterial>(null)
 
-  const leafRef = useRef<THREE.InstancedMesh>(null)
-  const fireflyRef = useRef<THREE.Points>(null)
+  const particleCount = gameState === 'preview' ? 200 : 400
+  const fireflyCount = gameState === 'preview' ? 50 : 150
+
+  const leafShader = useMemo(() => ({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      uniform float uTime;
+      varying float vAlpha;
+      void main() {
+        vec4 ip = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        float speed = 0.5 + fract(ip.x * 127.1) * 1.0;
+        float phase = fract(ip.z * 311.7) * 6.28;
+        float y = ip.y - mod(uTime * speed, 15.0);
+        if (y < -0.5) y += 15.0;
+        float x = ip.x + sin(uTime + phase) * 2.0;
+        float z = ip.z + cos(uTime * 0.5 + phase) * 2.0;
+        float rot = uTime * fract(ip.x * 43.7) * 2.0;
+        vec3 pos = position;
+        float c = cos(rot); float s = sin(rot);
+        pos = vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);
+        vec4 worldPos = modelMatrix * vec4(pos + vec3(x, y, z), 1.0);
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+        vAlpha = 1.0;
+      }
+    `,
+    fragmentShader: `
+      varying float vAlpha;
+      void main() {
+        gl_FragColor = vec4(0.18, 0.35, 0.15, vAlpha);
+      }
+    `,
+  }), [])
+
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const setLeafInstances = (mesh: THREE.InstancedMesh | null) => {
+    if (!mesh) return
+    const random = mulberry32(seed * 123)
+    for (let i = 0; i < particleCount; i++) {
+      dummy.position.set(
+        (random() - 0.5) * GRASS_RANGE,
+        5 + random() * 10,
+        (random() - 0.5) * GRASS_RANGE
+      )
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    }
+    mesh.instanceMatrix.needsUpdate = true
+  }
 
   const firefliesData = useMemo(() => {
-    const count = gameState === 'preview' ? 100 : 250
-    const positions = new Float32Array(count * 3)
+    const positions = new Float32Array(fireflyCount * 3)
     const random = mulberry32(seed * 456)
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < fireflyCount; i++) {
       positions[i * 3] = (random() - 0.5) * GRASS_RANGE
       positions[i * 3 + 1] = random() * 3
       positions[i * 3 + 2] = (random() - 0.5) * GRASS_RANGE
     }
     return positions
-  }, [seed, gameState])
+  }, [seed, fireflyCount])
 
   useFrame((state) => {
-    const time = state.clock.elapsedTime
-    if (leafRef.current) {
-      particles.forEach((p, i) => {
-        let y = p.y - (time * p.speed) % 15
-        if (y < -0.5) y += 15
-        const x = p.x + Math.sin(time + p.phase) * 2
-        const z = p.z + Math.cos(time * 0.5 + p.phase) * 2
-        dummy.position.set(x, y, z)
-        dummy.rotation.set(time * p.rotSpeed, time * p.rotSpeed * 0.5, 0)
-        dummy.updateMatrix()
-        leafRef.current!.setMatrixAt(i, dummy.matrix)
-      })
-      leafRef.current.instanceMatrix.needsUpdate = true
-    }
-    
-    if (fireflyRef.current) {
-      const pos = fireflyRef.current.geometry.attributes.position.array as Float32Array
-      const count = pos.length / 3
-      for (let i = 0; i < count; i++) {
-        pos[i * 3 + 1] += Math.sin(time + i) * 0.005
-      }
-      fireflyRef.current.geometry.attributes.position.needsUpdate = true
+    if (materialRef.current) {
+      materialRef.current.uniforms.uTime.value = state.clock.elapsedTime
     }
   })
 
   return (
     <group>
-      <instancedMesh ref={leafRef} args={[leafGeo, leafMat, particleCount]} />
-      <points ref={fireflyRef}>
+      <instancedMesh ref={setLeafInstances} args={[undefined, undefined, particleCount]}>
+        <planeGeometry args={[0.1, 0.1]} />
+        <shaderMaterial ref={materialRef} args={[leafShader]} side={THREE.DoubleSide} />
+      </instancedMesh>
+      <points>
         <bufferGeometry>
           <bufferAttribute
             attach="attributes-position"
@@ -1485,19 +1511,22 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
         uProjectionMatrix: { value: new THREE.Matrix4() },
         uViewMatrix: { value: new THREE.Matrix4() },
         uIsPreview: { value: gameState === 'preview' ? 1.0 : 0.0 },
+        uDigSpots: { value: digSpotsArray },
+        uDigSpotCount: { value: 0 },
         ...THREE.UniformsLib.fog,
       },
       alphaTest: 0.5,
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vInstanceColor;
-        // varying vec3 vWorldPosition;
         uniform float uTime;
         uniform vec3 uPlayerPos;
         uniform vec3 uCameraPos;
         uniform mat4 uProjectionMatrix;
         uniform mat4 uViewMatrix;
         uniform float uIsPreview;
+        uniform vec2 uDigSpots[64];
+        uniform int uDigSpotCount;
         // #include <fog_pars_vertex>
         
         float hash(vec2 p) {
@@ -1568,6 +1597,17 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
           if (h > threshold) {
             gl_Position = vec4(0.0);
             return;
+          }
+
+          // DIG SPOT CULLING
+          for (int d = 0; d < 64; d++) {
+            if (d >= uDigSpotCount) break;
+            float ddx = worldInstancePos.x - uDigSpots[d].x;
+            float ddz = worldInstancePos.z - uDigSpots[d].y;
+            if (ddx * ddx + ddz * ddz < 2.25) { // 1.5 * 1.5
+              gl_Position = vec4(0.0);
+              return;
+            }
           }
 
           // WIND - Simplified noise call
@@ -1703,30 +1743,19 @@ function Grass({ seed, playerRef, rockData, gameState }: { seed: number, playerR
     const projMatrix = state.camera.projectionMatrix
     const viewMatrix = state.camera.matrixWorldInverse
 
-    if (nearMaterialRef.current) {
-      nearMaterialRef.current.uniforms.uTime.value = time
-      nearMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
-      nearMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      nearMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
-      nearMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
-      nearMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
+    const updateMaterial = (mat: THREE.ShaderMaterial | null) => {
+      if (!mat) return
+      mat.uniforms.uTime.value = time
+      mat.uniforms.uCameraPos.value.copy(cameraPos)
+      mat.uniforms.uPlayerPos.value.copy(playerPos)
+      mat.uniforms.uProjectionMatrix.value.copy(projMatrix)
+      mat.uniforms.uViewMatrix.value.copy(viewMatrix)
+      mat.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
+      mat.uniforms.uDigSpotCount.value = digSpotsCount
     }
-    if (midMaterialRef.current) {
-      midMaterialRef.current.uniforms.uTime.value = time
-      midMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
-      midMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      midMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
-      midMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
-      midMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
-    }
-    if (farMaterialRef.current) {
-      farMaterialRef.current.uniforms.uTime.value = time
-      farMaterialRef.current.uniforms.uCameraPos.value.copy(cameraPos)
-      farMaterialRef.current.uniforms.uPlayerPos.value.copy(playerPos)
-      farMaterialRef.current.uniforms.uProjectionMatrix.value.copy(projMatrix)
-      farMaterialRef.current.uniforms.uViewMatrix.value.copy(viewMatrix)
-      farMaterialRef.current.uniforms.uIsPreview.value = gameState === 'preview' ? 1.0 : 0.0
-    }
+    updateMaterial(nearMaterialRef.current)
+    updateMaterial(midMaterialRef.current)
+    updateMaterial(farMaterialRef.current)
   })
 
   return (
@@ -1972,24 +2001,19 @@ function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' 
         float detail = noise(vWorldPos.xz * 0.2);
         vec3 grassColor = mix(vec3(0.17, 0.35, 0.15), vec3(0.2, 0.4, 0.18), detail);
         vec3 sandColor = mix(vec3(0.76, 0.7, 0.5), vec3(0.8, 0.75, 0.55), detail);
-        vec3 oceanColor = vec3(0.0, 0.44, 0.62);
 
-        // Define zones: Island center -> Grass -> Sand -> Ocean
-        float edgeThreshold = 0.12;
-        float beachWidth = 0.12;
-        
-        // Smooth transitions between zones
-        float sandMask = smoothstep(edgeThreshold - 0.05, edgeThreshold + 0.05, islandValue);
-        float grassMask = smoothstep(edgeThreshold + beachWidth - 0.05, edgeThreshold + beachWidth + 0.05, islandValue);
-        
-        vec3 finalGroundColor = mix(sandColor, grassColor, grassMask);
-        vec3 color = mix(oceanColor, finalGroundColor, sandMask);
-        
-        // Discard or alpha-blend edges of the 200x200 plane to reveal the infinite ocean below
-        float alpha = smoothstep(0.9, 0.8, d); // d is distance from center in normalized units
-        if (alpha < 0.01) discard;
-      
-        gl_FragColor = vec4(color, alpha);
+        // Use raw distance from center for the ground coverage
+        float rawD = length(np);
+
+        // Ground covers generously based on distance from center
+        float groundAlpha = smoothstep(1.0, 0.85, rawD);
+        if (groundAlpha < 0.01) discard;
+
+        // Color: grass inland, sand at edges
+        float grassMask = smoothstep(0.05, 0.25, islandValue);
+        vec3 color = mix(sandColor, grassColor, grassMask);
+
+        gl_FragColor = vec4(color, groundAlpha);
       }
     `,
     transparent: true,
@@ -1997,12 +2021,15 @@ function IslandGround({ seed, gameState }: { seed: number, gameState: 'preview' 
   }), [seed, gameState])
 
   return (
-    <RigidBody type="fixed">
-      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
+    <>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.49, 0]}>
         <planeGeometry args={[GRASS_RANGE, GRASS_RANGE]} />
         <shaderMaterial attach="material" args={[shader]} fog={false} />
       </mesh>
-    </RigidBody>
+      <RigidBody type="fixed" position={[0, -0.5, 0]}>
+        <CuboidCollider args={[GRASS_RANGE / 2, 0.01, GRASS_RANGE / 2]} />
+      </RigidBody>
+    </>
   )
 }
 
@@ -2064,10 +2091,17 @@ function Ocean() {
   )
 }
 
-export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef: React.RefObject<THREE.Group | null>, gameState: 'preview' | 'playing' }) {
+interface SceneProps {
+  seed: number
+  playerRef: React.RefObject<THREE.Group | null>
+  gameState: 'preview' | 'playing'
+  onAction?: (x: number, y: number, z: number) => void
+}
+
+export const Scene = memo(function Scene({ seed, playerRef, gameState, onAction }: SceneProps) {
   const [rockData, setRockData] = useState<{ x: number, z: number, radius: number }[]>([])
   const [palmData, setPalmData] = useState<{ x: number, z: number, radius: number }[]>([])
-  
+
   const leafGeometry = useMemo(() => {
     // Create palm frond with thickness and segmented appearance
     const segments = 12 // More segments for better shape
@@ -2100,7 +2134,7 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
         ) : (
           <fog attach="fog" args={["#87ceeb", 300, 500]} />
         )} */}
-        {gameState === 'playing' && <PointerLockControls pointerSpeed={4} />}
+        {gameState === 'playing' && <PointerLockControls pointerSpeed={8} />}
         <Sky sunPosition={[100, 20, 100]} turbidity={0.1} rayleigh={0.5} />
         <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
         <Environment preset="park" />
@@ -2118,7 +2152,8 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
         />
         
         <Physics gravity={[0, -9.81, 0]} interpolate={true}>
-          <Player ref={playerRef} gameState={gameState} />
+          <Player ref={playerRef} gameState={gameState} onAction={onAction} />
+          <MultiplayerLayer playerRef={playerRef} />
           
           <IslandGround seed={seed} gameState={gameState} />
           <Ocean />
@@ -2142,15 +2177,7 @@ export function Scene({ seed, playerRef, gameState }: { seed: number, playerRef:
           <Flowers seed={seed} rockData={rockData} gameState={gameState} />
         </Physics>
 
-        <ContactShadows
-          opacity={0.4}
-          scale={GRASS_RANGE}
-          blur={1.5}
-          far={10}
-          resolution={256}
-          color="#1a3317"
-        />
       </Canvas>
     </KeyboardControls>
   )
-}
+})
